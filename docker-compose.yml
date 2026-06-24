@@ -1,0 +1,27 @@
+services:
+
+  ofelia:
+    image: mcuadros/ofelia:latest
+    restart: unless-stopped
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      # Lance un nouveau container chaque lundi à 08h00, il s'arrête tout seul.
+      ofelia.job-run.weekly-connection.schedule: "0 8 * * 1"
+      ofelia.job-run.weekly-connection.image: "ghcr.io/OWNER/holy-energy-weekly-connection:latest"
+      ofelia.job-run.weekly-connection.volume: "${PWD}/.env:/app/.env:ro"
+      ofelia.job-run.weekly-connection.delete: "true"
+
+# Pour build l'image localement (développement) :
+#   docker compose --profile build build
+#   Puis remplacer l'image ci-dessus par "holy-energy-weekly"
+#
+# build:
+#   service: holy-energy-dev
+#   profiles: [build]
+#
+# holy-energy-dev:
+#   build: .
+#   image: holy-energy-weekly
+#   profiles: [build]

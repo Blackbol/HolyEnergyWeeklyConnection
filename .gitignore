@@ -1,0 +1,33 @@
+# Credentials — ne jamais committer
+.env
+
+# Dossier interne Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environnement virtuel
+venv/
+.venv/
+env/
+
+# Caches outils
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Cookies de session (contiennent des tokens d'auth)
+cookies.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
