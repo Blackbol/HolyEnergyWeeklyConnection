@@ -1,27 +1,29 @@
 services:
 
+  holy-energy:
+    image: ghcr.io/blackbol/holyenergyweeklyconnection:latest
+    container_name: holy-energy
+    environment:
+      - HOLY_EMAIL=${HOLY_EMAIL}
+      - HOLY_PASSWORD=${HOLY_PASSWORD}
+      - HOLY_SHOPIFY_COOKIE=${HOLY_SHOPIFY_COOKIE}
+      - HOLY_TIMEOUT=${HOLY_TIMEOUT:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-PROD}
+      - TZ=Europe/Paris
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    # restart: unless-stopped  # Désactivé — lancé uniquement par ofelia chaque lundi
+
   ofelia:
     image: mcuadros/ofelia:latest
-    restart: unless-stopped
+    container_name: ofelia
+    depends_on:
+      - holy-energy
     command: daemon --docker
+    labels:
+      ofelia.job-run.weekly-connection.schedule: "0 8 * * 1"   # lundi 08:00
+      ofelia.job-run.weekly-connection.container: "holy-energy"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    labels:
-      # Lance un nouveau container chaque lundi à 08h00, il s'arrête tout seul.
-      ofelia.job-run.weekly-connection.schedule: "0 8 * * 1"
-      ofelia.job-run.weekly-connection.image: "ghcr.io/OWNER/holy-energy-weekly-connection:latest"
-      ofelia.job-run.weekly-connection.volume: "${PWD}/.env:/app/.env:ro"
-      ofelia.job-run.weekly-connection.delete: "true"
-
-# Pour build l'image localement (développement) :
-#   docker compose --profile build build
-#   Puis remplacer l'image ci-dessus par "holy-energy-weekly"
-#
-# build:
-#   service: holy-energy-dev
-#   profiles: [build]
-#
-# holy-energy-dev:
-#   build: .
-#   image: holy-energy-weekly
-#   profiles: [build]
+    restart: unless-stopped

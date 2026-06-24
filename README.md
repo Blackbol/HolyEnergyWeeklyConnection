@@ -45,8 +45,8 @@ C'est la méthode recommandée pour un NAS (Synology, QNAP, etc.). Le container 
 
 ```bash
 mkdir holy-energy && cd holy-energy
-curl -O https://raw.githubusercontent.com/OWNER/holy-energy-weekly-connection/main/docker-compose.yml
-curl -O https://raw.githubusercontent.com/OWNER/holy-energy-weekly-connection/main/.env.example
+curl -O https://raw.githubusercontent.com/Blackbol/HolyEnergyWeeklyConnection/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/Blackbol/HolyEnergyWeeklyConnection/main/.env.example
 ```
 
 ### 2. Configurer
@@ -56,9 +56,41 @@ cp .env.example .env
 # Édite .env avec tes informations
 ```
 
-### 3. Remplacer `OWNER` dans `docker-compose.yml`
+### 3. Créer le `docker-compose.yml`
 
-Ouvre `docker-compose.yml` et remplace `OWNER` par le nom d'utilisateur GitHub du repo.
+Crée un fichier `docker-compose.yml` avec ce contenu :
+
+```yaml
+services:
+
+  holy-energy:
+    image: ghcr.io/blackbol/holyenergyweeklyconnection:latest
+    container_name: holy-energy
+    environment:
+      - HOLY_EMAIL=${HOLY_EMAIL}
+      - HOLY_PASSWORD=${HOLY_PASSWORD}
+      - HOLY_SHOPIFY_COOKIE=${HOLY_SHOPIFY_COOKIE}
+      - HOLY_TIMEOUT=${HOLY_TIMEOUT:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-PROD}
+      - TZ=Europe/Paris
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    # restart: unless-stopped  # Désactivé — lancé uniquement par ofelia chaque lundi
+
+  ofelia:
+    image: mcuadros/ofelia:latest
+    container_name: ofelia
+    depends_on:
+      - holy-energy
+    command: daemon --docker
+    labels:
+      ofelia.job-run.weekly-connection.schedule: "0 8 * * 1"   # lundi 08:00
+      ofelia.job-run.weekly-connection.container: "holy-energy"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+```
 
 ### 4. Démarrer
 
@@ -77,7 +109,7 @@ docker compose logs ofelia
 ### Tester immédiatement sans attendre lundi
 
 ```bash
-docker run --rm --env-file .env ghcr.io/OWNER/holy-energy-weekly-connection:latest
+docker run --rm --env-file .env ghcr.io/blackbol/holyenergyweeklyconnection:latest
 ```
 
 ---
@@ -87,7 +119,7 @@ docker run --rm --env-file .env ghcr.io/OWNER/holy-energy-weekly-connection:late
 Si tu préfères gérer le scheduling toi-même (cron du NAS, planificateur de tâches, etc.) :
 
 ```bash
-docker run --rm --env-file .env ghcr.io/OWNER/holy-energy-weekly-connection:latest
+docker run --rm --env-file .env ghcr.io/blackbol/holyenergyweeklyconnection:latest
 ```
 
 Lance cette commande chaque lundi matin depuis le planificateur de tâches de ton NAS.
@@ -135,7 +167,7 @@ Il suffit de répéter l'étape 1 (extraire un nouveau cookie depuis le navigate
 ## Construction depuis les sources
 
 ```bash
-git clone https://github.com/OWNER/holy-energy-weekly-connection.git
+git clone https://github.com/Blackbol/HolyEnergyWeeklyConnection.git
 cd holy-energy-weekly-connection
 
 python -m venv venv
