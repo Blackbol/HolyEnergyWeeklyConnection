@@ -1,6 +1,9 @@
 # Credentials — ne jamais committer
 .env
 
+# Cookie persisté entre les runs (contient un token d'auth)
+data/
+
 # Dossier interne Claude Code
 .claude/
 

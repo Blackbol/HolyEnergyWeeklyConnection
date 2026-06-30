@@ -83,7 +83,7 @@ services:
     container_name: ofelia
     depends_on:
       - holy-energy
-    command: daemon --docker
+    command: daemon --docker -f label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}
     labels:
       ofelia.job-run.weekly-connection.schedule: "0 8 * * 1"   # lundi 08:00
       ofelia.job-run.weekly-connection.container: "holy-energy"

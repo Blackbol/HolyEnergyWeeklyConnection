@@ -3,11 +3,13 @@
 import base64
 import json
 import logging
+import os
 import re
 import time
 import urllib.parse
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 
@@ -20,6 +22,10 @@ from holy_energy_weekly_connection.models import ConnectionResult, Credentials
 logger = logging.getLogger(__name__)
 
 _PROD = 25  # human-friendly log level, between INFO(20) and WARNING(30)
+
+# Shopify rotates _shopify_essential on every response.
+# The updated value is persisted here so each run uses the latest cookie.
+COOKIE_FILE = Path(os.getenv("HOLY_COOKIE_FILE", "data/cookie.txt"))
 
 BASE_URL = "https://fr.holy.com"
 ACCOUNT_URL = f"{BASE_URL}/account"
@@ -76,13 +82,42 @@ class HolyEnergyClient:
 
     def __init__(self, credentials: Credentials) -> None:
         self._credentials = credentials
+        # Prefer the persisted cookie (updated after each run) over the .env value.
+        cookie = self._load_cookie(credentials.shopify_cookie.get_secret_value())
         self._http = httpx.Client(
             timeout=credentials.timeout,
             follow_redirects=True,
-            cookies={
-                "_shopify_essential": credentials.shopify_cookie.get_secret_value()
-            },
+            cookies={"_shopify_essential": cookie},
         )
+
+    @staticmethod
+    def _load_cookie(env_cookie: str) -> str:
+        """Return the persisted cookie if available, otherwise the .env value."""
+        try:
+            saved = COOKIE_FILE.read_text().strip()
+            if saved:
+                logger.debug("Using persisted cookie from %s", COOKIE_FILE)
+                return saved
+        except FileNotFoundError:
+            pass
+        return env_cookie
+
+    def _save_cookie(self) -> None:
+        """Persist the latest cookie Shopify sent so the next run stays valid."""
+        # The jar can hold several _shopify_essential entries with different
+        # Domain attributes (the one we seeded manually vs. the one Shopify
+        # set in its response), so .get() raises CookieConflict. Take the
+        # last match instead — it's the one most recently written to the jar.
+        matches = [c for c in self._http.cookies.jar if c.name == "_shopify_essential"]
+        if not matches:
+            return
+        new_value = matches[-1].value
+        try:
+            COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            COOKIE_FILE.write_text(new_value)
+            logger.debug("Cookie persisted to %s", COOKIE_FILE)
+        except OSError as exc:
+            logger.warning("Could not persist cookie: %s", exc)
 
     def connect(self) -> ConnectionResult:
         """Visit the account page and trigger the LoyaltyLion weekly visit credit.
@@ -103,6 +138,7 @@ class HolyEnergyClient:
         logger.log(_PROD, "Connexion au site Holy Energy en cours (%s)...", self._credentials.email)
 
         page_html = self._fetch_account_page()
+        self._save_cookie()  # persist the rotated cookie Shopify sent with the response
         points_credited, message, balance = self._track_loyalty_visit(page_html)
 
         logger.info(message)
