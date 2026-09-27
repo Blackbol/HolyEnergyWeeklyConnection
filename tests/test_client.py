@@ -12,6 +12,8 @@ from pytest_httpx import HTTPXMock
 
 from holy_energy_weekly_connection.client import (
     ACCOUNT_LOGIN_URL,
+    ACCOUNT_URL,
+    STORE_URL,
     HolyEnergyClient,
     _js_encode,
 )
@@ -37,6 +39,30 @@ SAMPLE_AUTH_HTML = """
       }
     }
   });
+</script>
+</body>
+</html>
+"""
+
+SAMPLE_REAL_HOLY_HTML = """
+<!DOCTYPE html>
+<html>
+<head><title>Mon Compte - Holy Energy</title></head>
+<body>
+<script>
+      loyaltylion.init(
+        {
+          token: "6e324c01a0c0fc74286ffcd8000b5912",
+          customer: {
+            id: 79123456789,
+            email: "Alexlimongi30+holy@gmail.com"
+          },
+          auth: {
+            date: 1727440000,
+            token: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4"
+          }
+        }
+      );
 </script>
 </body>
 </html>
@@ -70,7 +96,7 @@ def test_js_encode() -> None:
 
 def test_parse_loyaltylion_tokens_success(tmp_path: Path) -> None:
     creds = Credentials(
-        shopify_cookie=SecretStr("cookie_val"),
+        shopify_cookie=SecretStr("valid_cookie"),
         cookie_file=tmp_path / "cookie.txt",
     )
     with patch("holy_energy_weekly_connection.client.ensure_dns_resolution"):
@@ -84,9 +110,25 @@ def test_parse_loyaltylion_tokens_success(tmp_path: Path) -> None:
         assert customer.shop_token == "6e324c01a0c0fc74286ffcd8000b5912"
 
 
+def test_parse_loyaltylion_tokens_real_holy_layout(tmp_path: Path) -> None:
+    creds = Credentials(
+        shopify_cookie=SecretStr("valid_cookie"),
+        cookie_file=tmp_path / "cookie.txt",
+    )
+    with patch("holy_energy_weekly_connection.client.ensure_dns_resolution"):
+        client = HolyEnergyClient(creds)
+        customer = client._parse_loyaltylion_tokens(SAMPLE_REAL_HOLY_HTML)
+        assert customer is not None
+        assert customer.customer_id == "79123456789"
+        assert customer.email == "Alexlimongi30+holy@gmail.com"
+        assert customer.auth_date == "1727440000"
+        assert customer.mac == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4"
+        assert customer.shop_token == "6e324c01a0c0fc74286ffcd8000b5912"
+
+
 def test_parse_loyaltylion_tokens_unauth(tmp_path: Path) -> None:
     creds = Credentials(
-        shopify_cookie=SecretStr("cookie_val"),
+        shopify_cookie=SecretStr("valid_cookie"),
         cookie_file=tmp_path / "cookie.txt",
     )
     with patch("holy_energy_weekly_connection.client.ensure_dns_resolution"):
@@ -100,7 +142,7 @@ def test_verify_session_success(httpx_mock: HTTPXMock, tmp_path: Path) -> None:
     creds = Credentials(shopify_cookie=SecretStr("valid_cookie"), cookie_file=cookie_file)
 
     httpx_mock.add_response(
-        url=ACCOUNT_LOGIN_URL,
+        url=ACCOUNT_URL,
         text=SAMPLE_AUTH_HTML,
         headers={"Set-Cookie": "_shopify_essential=rotated_new_cookie; Path=/; Domain=fr.holy.com"},
     )
@@ -122,10 +164,11 @@ def test_verify_session_unauth_raises_error(httpx_mock: HTTPXMock, tmp_path: Pat
     cookie_file = tmp_path / "cookie.txt"
     creds = Credentials(shopify_cookie=SecretStr("expired_cookie"), cookie_file=cookie_file)
 
-    httpx_mock.add_response(
-        url=ACCOUNT_LOGIN_URL,
-        text=SAMPLE_UNAUTH_HTML,
-    )
+    for u in [ACCOUNT_URL, STORE_URL, ACCOUNT_LOGIN_URL]:
+        httpx_mock.add_response(
+            url=u,
+            text=SAMPLE_UNAUTH_HTML,
+        )
 
     with (
         patch("holy_energy_weekly_connection.client.ensure_dns_resolution"),
@@ -133,7 +176,7 @@ def test_verify_session_unauth_raises_error(httpx_mock: HTTPXMock, tmp_path: Pat
         pytest.raises(AuthenticationError) as exc_info,
     ):
         client.verify_session()
-    assert "expiré ou est invalide" in str(exc_info.value)
+    assert "_shopify_essential" in str(exc_info.value)
 
     # Ensure unauthenticated cookie was NOT saved
     assert not cookie_file.is_file()
@@ -150,14 +193,15 @@ def test_verify_session_fallback_from_cookie_file_to_env(
         cookie_file=cookie_file,
     )
 
-    # First request with old cookie returns unauth HTML
+    # First request with old cookie returns unauth HTML across endpoints
+    for u in [ACCOUNT_URL, STORE_URL, ACCOUNT_LOGIN_URL]:
+        httpx_mock.add_response(
+            url=u,
+            text=SAMPLE_UNAUTH_HTML,
+        )
+    # Second request with fresh env cookie returns auth HTML on ACCOUNT_URL
     httpx_mock.add_response(
-        url=ACCOUNT_LOGIN_URL,
-        text=SAMPLE_UNAUTH_HTML,
-    )
-    # Second request with fresh env cookie returns auth HTML
-    httpx_mock.add_response(
-        url=ACCOUNT_LOGIN_URL,
+        url=ACCOUNT_URL,
         text=SAMPLE_AUTH_HTML,
         headers={"Set-Cookie": "_shopify_essential=new_rotated_cookie; Path=/; Domain=fr.holy.com"},
     )
@@ -174,7 +218,7 @@ def test_verify_session_fallback_from_cookie_file_to_env(
 
 
 def test_evaluate_loyaltylion_new_points_via_notifications(tmp_path: Path) -> None:
-    creds = Credentials(shopify_cookie=SecretStr("dummy"), cookie_file=tmp_path / "c.txt")
+    creds = Credentials(shopify_cookie=SecretStr("dummy_cookie"), cookie_file=tmp_path / "c.txt")
     with patch("holy_energy_weekly_connection.client.ensure_dns_resolution"):
         client = HolyEnergyClient(creds)
         data = {
@@ -190,7 +234,7 @@ def test_evaluate_loyaltylion_new_points_via_notifications(tmp_path: Path) -> No
 
 
 def test_evaluate_loyaltylion_already_credited_rule_context(tmp_path: Path) -> None:
-    creds = Credentials(shopify_cookie=SecretStr("dummy"), cookie_file=tmp_path / "c.txt")
+    creds = Credentials(shopify_cookie=SecretStr("dummy_cookie"), cookie_file=tmp_path / "c.txt")
     with patch("holy_energy_weekly_connection.client.ensure_dns_resolution"):
         client = HolyEnergyClient(creds)
         data = {
@@ -216,7 +260,7 @@ def test_connect_full_flow(httpx_mock: HTTPXMock, tmp_path: Path) -> None:
 
     # 1. Verification request to fr.holy.com
     httpx_mock.add_response(
-        url=ACCOUNT_LOGIN_URL,
+        url=ACCOUNT_URL,
         text=SAMPLE_AUTH_HTML,
     )
 

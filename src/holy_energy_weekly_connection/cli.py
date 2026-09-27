@@ -61,24 +61,74 @@ def setup_logging(level_name: str | None = None) -> None:
         logging.warning("Impossible d'activer le fichier de log %s : %s", log_file, exc)
 
 
+def validate_env_cookie(raw_cookie: str | None) -> str:
+    """Validate that the session cookie is present and not a placeholder."""
+    if not raw_cookie or not raw_cookie.strip():
+        raise ConfigurationError(
+            "Aucun cookie de session trouvé dans le fichier .env (variable HOLY_SHOPIFY_COOKIE absente ou vide).\n"
+            "Le projet ne peut pas se lancer sans cookie de session.\n\n"
+            "👉 Pour le configurer :\n"
+            "  1. Connectez-vous sur https://fr.holy.com dans votre navigateur.\n"
+            "  2. Ouvrez les outils de développement (F12 -> Application -> Cookies -> https://fr.holy.com).\n"
+            "  3. Copiez la valeur du cookie '_shopify_essential'.\n"
+            "  4. Renseignez la variable dans votre fichier .env :\n"
+            "     HOLY_SHOPIFY_COOKIE=:AZ..."
+        )
+
+    clean = raw_cookie.strip().strip('"\'')
+
+    # Detect placeholders from .env.example
+    lower = clean.lower()
+    placeholders = [
+        "collez_votre_cookie",
+        "collez_ici",
+        "votre_cookie",
+        "your_cookie",
+        "remplacer",
+        "<cookie>",
+    ]
+    for ph in placeholders:
+        if ph in lower:
+            raise ConfigurationError(
+                f"Le cookie dans le fichier .env contient un texte d'exemple ({ph!r}).\n"
+                "Vous devez remplacer cette valeur par votre véritable cookie '_shopify_essential'.\n\n"
+                "👉 Rendez-vous sur https://fr.holy.com -> F12 -> Application -> Cookies -> _shopify_essential"
+            )
+
+    if "..." in clean:
+        raise ConfigurationError(
+            "Le cookie dans le fichier .env semble incomplet (contient '...').\n"
+            "Veuillez vous assurer de copier l'intégralité de la valeur du cookie _shopify_essential."
+        )
+
+    if len(clean) < 15:
+        raise ConfigurationError(
+            f"Le cookie dans le fichier .env est anormalement court ({len(clean)} caractères).\n"
+            "Un cookie _shopify_essential valide mesure généralement entre 800 et 1500 caractères.\n"
+            "Vérifiez que vous avez bien copié toute la chaîne."
+        )
+
+    return clean
+
+
 def load_credentials_from_env() -> Credentials:
     """Load configuration from environment variables and check requirements."""
     load_dotenv()
 
-    # The cookie can be provided via env or via data/cookie.txt
+    raw_cookie = os.getenv("HOLY_SHOPIFY_COOKIE")
     cookie_file_path = Path(os.getenv("HOLY_COOKIE_FILE", "data/cookie.txt"))
-    cookie_from_file = ""
-    if cookie_file_path.is_file():
-        cookie_from_file = cookie_file_path.read_text(encoding="utf-8").strip()
 
-    cookie_from_env = os.getenv("HOLY_SHOPIFY_COOKIE", "").strip()
-    active_cookie = cookie_from_file or cookie_from_env
+    # Fallback to rolling cookie file if env cookie is not provided or empty
+    candidate_cookie = raw_cookie
+    if (not candidate_cookie or not candidate_cookie.strip()) and cookie_file_path.is_file():
+        try:
+            persisted = cookie_file_path.read_text(encoding="utf-8").strip()
+            if persisted and len(persisted) >= 15 and "..." not in persisted:
+                candidate_cookie = persisted
+        except OSError:
+            pass
 
-    if not active_cookie:
-        raise ConfigurationError(
-            "Aucun cookie de session trouvé. "
-            "Renseignez HOLY_SHOPIFY_COOKIE dans .env ou enregistrez un cookie avec 'holy-connect set-cookie <COOKIE>'."
-        )
+    validated_cookie = validate_env_cookie(candidate_cookie)
 
     timeout_raw = os.getenv("HOLY_TIMEOUT", "30").strip()
     try:
@@ -95,7 +145,7 @@ def load_credentials_from_env() -> Credentials:
     ntfy_server = os.getenv("NTFY_SERVER", "https://ntfy.sh").strip()
 
     return Credentials(
-        shopify_cookie=SecretStr(active_cookie),
+        shopify_cookie=SecretStr(validated_cookie),
         email=os.getenv("HOLY_EMAIL", "").strip(),
         timeout=timeout,
         cookie_file=cookie_file_path,
@@ -157,6 +207,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def cmd_daemon(args: argparse.Namespace) -> int:
     """Run in background daemon scheduler mode."""
+    try:
+        load_credentials_from_env()
+    except ConfigurationError as exc:
+        logger.error("Configuration invalide au démarrage : %s", exc)
+        return 1
+
     day = os.getenv("HOLY_SCHEDULE_DAY", "monday")
     time_str = os.getenv("HOLY_SCHEDULE_TIME", "08:00")
     timezone = os.getenv("TZ", os.getenv("HOLY_TIMEZONE", "Europe/Paris"))
@@ -183,9 +239,10 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
 def cmd_set_cookie(args: argparse.Namespace) -> int:
     """Save and test a new session cookie."""
-    cookie = args.cookie.strip()
-    if not cookie:
-        logger.error("Le cookie ne peut pas être vide.")
+    try:
+        cookie = validate_env_cookie(args.cookie)
+    except ConfigurationError as exc:
+        logger.error("Cookie invalide : %s", exc)
         return 1
 
     cookie_file = Path(os.getenv("HOLY_COOKIE_FILE", "data/cookie.txt"))
@@ -195,7 +252,7 @@ def cmd_set_cookie(args: argparse.Namespace) -> int:
 
     # Test the newly saved cookie
     try:
-        creds = load_credentials_from_env()
+        creds = Credentials(shopify_cookie=SecretStr(cookie), cookie_file=cookie_file)
         with HolyEnergyClient(creds) as client:
             customer = client.verify_session()
             logger.info("🎉 Succès ! Le cookie est valide.")

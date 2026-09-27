@@ -34,6 +34,7 @@ logging.addLevelName(PROD, "PROD")
 
 BASE_URL = "https://fr.holy.com"
 ACCOUNT_URL = f"{BASE_URL}/account"
+STORE_URL = f"{BASE_URL}/"
 ACCOUNT_LOGIN_URL = f"{BASE_URL}/pages/account-login"
 LOYALTYLION_INIT_URL = "https://sdk.loyaltylion.net/sdk/init"
 DEFAULT_SHOP_TOKEN = "6e324c01a0c0fc74286ffcd8000b5912"
@@ -118,28 +119,27 @@ class HolyEnergyClient:
 
     def _set_client_cookies(self, cookie_value: str) -> None:
         """Assign the session cookie to the client jar for all Holy Energy domains."""
-        self._active_cookie = cookie_value
-        self._http.cookies.set("_shopify_essential", cookie_value, domain="fr.holy.com")
-        self._http.cookies.set("_shopify_essential", cookie_value, domain=".holy.com")
+        self._active_cookie = cookie_value.strip().strip('"\'')
+        for domain in ["fr.holy.com", ".holy.com", "shopify.com", ".shopify.com"]:
+            self._http.cookies.set("_shopify_essential", self._active_cookie, domain=domain)
+        self._http.cookies.set("_shopify_essential", self._active_cookie)
         logger.debug(
-            "Cookie _shopify_essential assigné au client HTTP (domaines: fr.holy.com, .holy.com, taille: %d)",
-            len(cookie_value),
+            "Cookie _shopify_essential assigné au client HTTP (domaines: fr.holy.com, .holy.com, shopify.com, .shopify.com, taille: %d)",
+            len(self._active_cookie),
         )
 
     def _load_persisted_cookie(self) -> str | None:
         """Read the persisted rolling cookie from disk if it exists."""
         try:
-            if self._cookie_file.is_file():
-                content = self._cookie_file.read_text(encoding="utf-8").strip()
-                if content:
-                    logger.debug("Lecture réussie du cookie roulant dans %s", self._cookie_file)
-                    return content
-                else:
-                    logger.debug("Le fichier de cookie roulant %s est vide.", self._cookie_file)
+            if not self._cookie_file.is_file():
+                return None
+
+            content = self._cookie_file.read_text(encoding="utf-8").strip().strip('"\'')
+            if content and len(content) >= 15 and "..." not in content:
+                logger.debug("Lecture réussie du cookie roulant dans %s", self._cookie_file)
+                return content
             else:
-                logger.debug(
-                    "Aucun fichier de cookie roulant trouvé à l'emplacement %s", self._cookie_file
-                )
+                logger.debug("Le fichier de cookie roulant %s est vide ou invalide.", self._cookie_file)
         except OSError as exc:
             logger.warning("Impossible de lire le fichier de cookie %s: %s", self._cookie_file, exc)
         return None
@@ -223,117 +223,174 @@ class HolyEnergyClient:
         return info
 
     def _fetch_and_parse_customer(self, use_env_fallback: bool = True) -> CustomerInfo:
-        """Fetch Holy Energy page and extract customer tokens with fallback to .env."""
-        logger.debug("Envoi de la requête GET vers %s...", ACCOUNT_LOGIN_URL)
-        t0 = time.time()
-        try:
-            response = self._http.get(ACCOUNT_LOGIN_URL)
-            elapsed = time.time() - t0
-            logger.debug(
-                "Réponse reçue en %.2fs : HTTP %d, URL finale : %s",
-                elapsed,
-                response.status_code,
-                response.url,
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "Erreur HTTP %d lors de la requête vers Holy Energy", exc.response.status_code
-            )
+        """Fetch Holy Energy storefront/account page and extract customer tokens with fallback."""
+        urls_to_try = [ACCOUNT_URL, STORE_URL, ACCOUNT_LOGIN_URL]
+        network_errors: list[Exception] = []
+        any_http_success = False
+
+        for url in urls_to_try:
+            logger.debug("Tentative de récupération des identifiants client via %s...", url)
+            t0 = time.time()
+            try:
+                response = self._http.get(url)
+                elapsed = time.time() - t0
+                logger.debug(
+                    "Réponse reçue en %.2fs : HTTP %d, URL finale : %s",
+                    elapsed,
+                    response.status_code,
+                    response.url,
+                )
+                response.raise_for_status()
+                any_http_success = True
+            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+                logger.debug("Requête sur %s a échoué : %s", url, exc)
+                network_errors.append(exc)
+                continue
+
+            html = response.text
+            final_url = str(response.url)
+
+            if response.history:
+                logger.debug(
+                    "Redirections suivies (%d) : %s",
+                    len(response.history),
+                    " -> ".join([str(r.url) for r in response.history] + [final_url]),
+                )
+
+            # Check if this request redirected to an unauthenticated login page
+            if self._is_login_redirect(final_url, html):
+                logger.debug(
+                    "Endpoint %s a redirigé vers une page de connexion (%s).",
+                    url,
+                    final_url,
+                )
+                continue
+
+            # Parse LoyaltyLion customer block
+            customer_info = self._parse_loyaltylion_tokens(html)
+            if customer_info:
+                # Session is valid: persist any refreshed cookie sent by Shopify
+                new_cookie = self._extract_response_cookie(response)
+                if new_cookie:
+                    self._save_cookie(new_cookie)
+
+                logger.info(
+                    "✅ Session authentifiée vérifiée sur %s : customer_id=%s, email=%s, date_auth=%s",
+                    url,
+                    customer_info.customer_id,
+                    customer_info.email,
+                    customer_info.auth_date,
+                )
+                return customer_info
+            else:
+                logger.debug("Identifiants LoyaltyLion non trouvés sur %s.", url)
+
+        # If all requests failed due to network errors, raise NetworkError
+        if not any_http_success and network_errors:
             raise NetworkError(
-                f"HTTP error fetching Holy Energy ({exc.response.status_code})"
-            ) from exc
-        except httpx.RequestError as exc:
-            logger.error("Erreur réseau de connexion vers Holy Energy: %s", exc)
-            raise NetworkError(f"Network error connecting to Holy Energy: {exc}") from exc
+                f"Échec de connexion réseau aux serveurs Holy Energy : {network_errors[-1]}"
+            ) from network_errors[-1]
 
-        html = response.text
-        final_url = str(response.url)
-
-        if response.history:
-            logger.debug(
-                "Redirections suivies (%d) : %s",
-                len(response.history),
-                " -> ".join([str(r.url) for r in response.history] + [final_url]),
-            )
-
-        # Check for unauthenticated login redirection
-        if self._is_login_redirect(final_url, html):
-            logger.warning(
-                "Redirection vers une page de connexion détectée (URL: %s). Le cookie semble non authentifié.",
-                final_url,
-            )
-            # If we were using the persisted cookie, retry with the .env cookie as fallback
-            env_cookie = self._credentials.shopify_cookie.get_secret_value()
-            if use_env_fallback and self._active_cookie != env_cookie:
-                logger.info(
-                    "Le cookie roulant a été rejeté par Shopify ; tentative automatique de secours avec le cookie .env..."
-                )
-                self._set_client_cookies(env_cookie)
-                return self._fetch_and_parse_customer(use_env_fallback=False)
-
-            raise AuthenticationError(
-                "Le cookie de session Holy Energy a expiré ou est invalide. "
-                "Veuillez vous reconnecter sur fr.holy.com et mettre à jour le cookie _shopify_essential."
-            )
-
-        # Parse LoyaltyLion customer block
-        customer_info = self._parse_loyaltylion_tokens(html)
-        if not customer_info:
-            logger.warning("Échec du parsing des identifiants LoyaltyLion dans le HTML.")
-            # If customer tokens could not be found, check if retry with .env helps
-            env_cookie = self._credentials.shopify_cookie.get_secret_value()
-            if use_env_fallback and self._active_cookie != env_cookie:
-                logger.info(
-                    "Identifiants client absents avec le cookie roulant ; tentative avec le cookie .env..."
-                )
-                self._set_client_cookies(env_cookie)
-                return self._fetch_and_parse_customer(use_env_fallback=False)
-
-            raise AuthenticationError(
-                "Impossible d'extraire les identifiants client LoyaltyLion. "
-                "La session n'est pas connectée. Veuillez renouveler le cookie _shopify_essential."
-            )
-
-        # Session is valid: persist any refreshed cookie sent by Shopify
-        new_cookie = self._extract_response_cookie(response)
-        if new_cookie:
-            self._save_cookie(new_cookie)
-
-        logger.info(
-            "✅ Session authentifiée vérifiée : customer_id=%s, email=%s, date_auth=%s",
-            customer_info.customer_id,
-            customer_info.email,
-            customer_info.auth_date,
+        logger.warning(
+            "Échec de l'extraction des identifiants LoyaltyLion sur tous les endpoints testés."
         )
-        return customer_info
+
+        # If customer tokens could not be found with active cookie, check if retry with .env helps
+        env_cookie = self._credentials.shopify_cookie.get_secret_value()
+        if use_env_fallback and self._active_cookie != env_cookie:
+            logger.info(
+                "Le cookie roulant a échoué ; tentative automatique de secours avec le cookie .env..."
+            )
+            self._set_client_cookies(env_cookie)
+            return self._fetch_and_parse_customer(use_env_fallback=False)
+
+        raise AuthenticationError(
+            "Impossible d'extraire les identifiants client LoyaltyLion. "
+            "La session n'est pas connectée. Veuillez renouveler le cookie _shopify_essential dans votre .env."
+        )
 
     def _parse_loyaltylion_tokens(self, html: str) -> CustomerInfo | None:
-        """Extract customer ID, email, auth_date, mac, and shop_token from HTML."""
-        # Find loyaltylion.init({...})
-        m = re.search(r"loyaltylion\.init\(\{(.+?)\}\)", html, re.DOTALL)
+        """Extract customer ID, email, auth_date, mac, and shop_token from HTML.
+
+        Supports various formatting variations (unquoted IDs, spacing, multi-line blocks).
+        """
+        # 1. Search for loyaltylion.init(...) block
+        m = re.search(r"loyaltylion\.init\s*\((.*?)\)\s*;", html, re.DOTALL)
         if not m:
+            m = re.search(r"loyaltylion\.init\s*\((.*?)\)", html, re.DOTALL)
+
+        search_text = m.group(1) if m else html
+        if "customer" not in search_text and "customer" in html:
+            search_text = html
+
+        # 2. Extract Shop Token (32 hex characters)
+        shop_token_m = re.search(
+            r'["\']?(?:token|site_token)["\']?\s*:\s*["\']([a-f0-9]{32})["\']',
+            search_text,
+        )
+        shop_token = shop_token_m.group(1) if shop_token_m else DEFAULT_SHOP_TOKEN
+
+        # 3. Extract Customer Email
+        email_m = re.search(
+            r'["\']?email["\']?\s*:\s*["\']([^"\'\s,]+@[^"\'\s,]+)["\']',
+            search_text,
+        )
+        if not email_m:
             return None
+        email = email_m.group(1).strip()
 
-        init_block = m.group(1)
-
-        # Must have customer block or customer fields
-        shop_token_match = re.search(r'token:\s*"([^"]+)"', init_block)
-        shop_token = shop_token_match.group(1) if shop_token_match else DEFAULT_SHOP_TOKEN
-
-        cid_match = re.search(r'id:\s*"([^"]+)"', init_block)
-        email_match = re.search(r'email:\s*"([^"]+)"', init_block)
-        date_match = re.search(r'date:\s*"([^"]+)"', init_block)
-        mac_match = re.search(r'token:\s*"([a-f0-9]{40})"', init_block)
-
-        if not (cid_match and email_match and date_match and mac_match):
+        # 4. Extract Customer ID (numeric or alphanumeric)
+        cid_m = re.search(
+            r'customer\s*:\s*\{[^}]*?["\']?id["\']?\s*:\s*["\']?([0-9a-zA-Z_\-]+)["\']?',
+            search_text,
+            re.DOTALL,
+        )
+        if not cid_m:
+            cid_m = re.search(
+                r'["\']?customer_id["\']?\s*:\s*["\']?([0-9a-zA-Z_\-]+)["\']?',
+                search_text,
+            )
+        if not cid_m:
+            cid_m = re.search(
+                r'id:\s*["\']?([0-9]{5,20})["\']?',
+                search_text,
+            )
+        if not cid_m:
             return None
+        cid = cid_m.group(1).strip()
+
+        # 5. Extract Auth Date
+        date_m = re.search(
+            r'["\']?date["\']?\s*:\s*["\']?([0-9]{8,15}|[0-9]{4}-[0-9]{2}-[0-9]{2}[^"\'\s,]*)["\']?',
+            search_text,
+        )
+        if not date_m:
+            return None
+        auth_date = date_m.group(1).strip()
+
+        # 6. Extract MAC token (40 hex chars)
+        mac_m = re.search(
+            r'["\']?(?:token|mac)["\']?\s*:\s*["\']([a-f0-9]{40})["\']',
+            search_text,
+        )
+        if not mac_m:
+            return None
+        mac = mac_m.group(1).strip()
+
+        logger.debug(
+            "Parsing LoyaltyLion réussi : id=%s, email=%s, date=%s, mac=%s, shop_token=%s",
+            cid,
+            email,
+            auth_date,
+            mac[:8] + "...",
+            shop_token[:8] + "...",
+        )
 
         return CustomerInfo(
-            customer_id=cid_match.group(1),
-            email=email_match.group(1),
-            auth_date=date_match.group(1),
-            mac=mac_match.group(1),
+            customer_id=cid,
+            email=email,
+            auth_date=auth_date,
+            mac=mac,
             shop_token=shop_token,
         )
 

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from holy_energy_weekly_connection.cli import (
+    cmd_daemon,
     cmd_run,
     cmd_set_cookie,
     cmd_verify,
@@ -24,19 +25,53 @@ def test_load_credentials_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setenv("HOLY_COOKIE_FILE", str(tmp_path / "non_existent.txt"))
     with (
         patch("holy_energy_weekly_connection.cli.load_dotenv"),
-        pytest.raises(ConfigurationError),
+        pytest.raises(ConfigurationError) as exc_info,
     ):
         load_credentials_from_env()
+    assert "Aucun cookie de session trouvé" in str(exc_info.value)
+
+
+def test_load_credentials_placeholder_cookie(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOLY_SHOPIFY_COOKIE", ":AZ...collez_votre_cookie_complet_ici...")
+    monkeypatch.setenv("HOLY_COOKIE_FILE", str(tmp_path / "non_existent.txt"))
+    with (
+        patch("holy_energy_weekly_connection.cli.load_dotenv"),
+        pytest.raises(ConfigurationError) as exc_info,
+    ):
+        load_credentials_from_env()
+    assert "texte d'exemple" in str(exc_info.value) or "incomplet" in str(exc_info.value)
+
+
+def test_load_credentials_ellipsis_cookie(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOLY_SHOPIFY_COOKIE", ":AZ123456789...rest_of_token:")
+    monkeypatch.setenv("HOLY_COOKIE_FILE", str(tmp_path / "non_existent.txt"))
+    with (
+        patch("holy_energy_weekly_connection.cli.load_dotenv"),
+        pytest.raises(ConfigurationError) as exc_info,
+    ):
+        load_credentials_from_env()
+    assert "incomplet" in str(exc_info.value)
+
+
+def test_load_credentials_short_cookie(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOLY_SHOPIFY_COOKIE", "short_cookie")
+    monkeypatch.setenv("HOLY_COOKIE_FILE", str(tmp_path / "non_existent.txt"))
+    with (
+        patch("holy_energy_weekly_connection.cli.load_dotenv"),
+        pytest.raises(ConfigurationError) as exc_info,
+    ):
+        load_credentials_from_env()
+    assert "anormalement court" in str(exc_info.value)
 
 
 def test_load_credentials_from_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cookie_file = tmp_path / "cookie.txt"
-    cookie_file.write_text("cookie_from_disk", encoding="utf-8")
+    cookie_file.write_text("cookie_from_disk_valid", encoding="utf-8")
     monkeypatch.delenv("HOLY_SHOPIFY_COOKIE", raising=False)
     monkeypatch.setenv("HOLY_COOKIE_FILE", str(cookie_file))
     with patch("holy_energy_weekly_connection.cli.load_dotenv"):
         creds = load_credentials_from_env()
-    assert creds.shopify_cookie.get_secret_value() == "cookie_from_disk"
+    assert creds.shopify_cookie.get_secret_value() == "cookie_from_disk_valid"
 
 
 def test_cmd_run_success() -> None:
@@ -110,3 +145,11 @@ def test_cmd_set_cookie(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         exit_code = cmd_set_cookie(args)
         assert exit_code == 0
         assert cookie_file.read_text(encoding="utf-8") == "new_cookie_content"
+
+
+def test_cmd_daemon_invalid_cookie_exits_one(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("HOLY_SHOPIFY_COOKIE", raising=False)
+    monkeypatch.setenv("HOLY_COOKIE_FILE", str(tmp_path / "non_existent.txt"))
+    with patch("holy_energy_weekly_connection.cli.load_dotenv"):
+        exit_code = cmd_daemon(argparse.Namespace())
+        assert exit_code == 1
