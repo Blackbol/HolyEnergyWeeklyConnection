@@ -142,7 +142,7 @@ def test_verify_session_success(httpx_mock: HTTPXMock, tmp_path: Path) -> None:
     creds = Credentials(shopify_cookie=SecretStr("valid_cookie"), cookie_file=cookie_file)
 
     httpx_mock.add_response(
-        url=ACCOUNT_URL,
+        url=STORE_URL,
         text=SAMPLE_AUTH_HTML,
         headers={"Set-Cookie": "_shopify_essential=rotated_new_cookie; Path=/; Domain=fr.holy.com"},
     )
@@ -199,9 +199,9 @@ def test_verify_session_fallback_from_cookie_file_to_env(
             url=u,
             text=SAMPLE_UNAUTH_HTML,
         )
-    # Second request with fresh env cookie returns auth HTML on ACCOUNT_URL
+    # Second request with fresh env cookie returns auth HTML on STORE_URL
     httpx_mock.add_response(
-        url=ACCOUNT_URL,
+        url=STORE_URL,
         text=SAMPLE_AUTH_HTML,
         headers={"Set-Cookie": "_shopify_essential=new_rotated_cookie; Path=/; Domain=fr.holy.com"},
     )
@@ -260,7 +260,7 @@ def test_connect_full_flow(httpx_mock: HTTPXMock, tmp_path: Path) -> None:
 
     # 1. Verification request to fr.holy.com
     httpx_mock.add_response(
-        url=ACCOUNT_URL,
+        url=STORE_URL,
         text=SAMPLE_AUTH_HTML,
     )
 

@@ -53,7 +53,7 @@ _HEADERS = {
         "q=0.8,application/signed-exchange;v=b3;q=0.7"
     ),
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Linux"',
@@ -224,7 +224,7 @@ class HolyEnergyClient:
 
     def _fetch_and_parse_customer(self, use_env_fallback: bool = True) -> CustomerInfo:
         """Fetch Holy Energy storefront/account page and extract customer tokens with fallback."""
-        urls_to_try = [ACCOUNT_URL, STORE_URL, ACCOUNT_LOGIN_URL]
+        urls_to_try = [STORE_URL, ACCOUNT_LOGIN_URL, ACCOUNT_URL]
         network_errors: list[Exception] = []
         any_http_success = False
 
@@ -361,9 +361,14 @@ class HolyEnergyClient:
 
         # 5. Extract Auth Date
         date_m = re.search(
-            r'["\']?date["\']?\s*:\s*["\']?([0-9]{8,15}|[0-9]{4}-[0-9]{2}-[0-9]{2}[^"\'\s,]*)["\']?',
+            r'["\']?date["\']?\s*:\s*["\']([^"\']+)["\']',
             search_text,
         )
+        if not date_m:
+            date_m = re.search(
+                r'["\']?date["\']?\s*:\s*([0-9]+)',
+                search_text,
+            )
         if not date_m:
             return None
         auth_date = date_m.group(1).strip()
