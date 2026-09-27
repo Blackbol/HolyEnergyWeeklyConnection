@@ -5,9 +5,14 @@ from holy_energy_weekly_connection.exceptions import (
     AuthenticationError,
     ConfigurationError,
     HolyEnergyError,
+    LoyaltyLionError,
     NetworkError,
 )
-from holy_energy_weekly_connection.models import ConnectionResult, Credentials
+from holy_energy_weekly_connection.models import (
+    ConnectionResult,
+    Credentials,
+    CustomerInfo,
+)
 
 __all__ = [
     "HolyEnergyClient",
@@ -15,6 +20,8 @@ __all__ = [
     "AuthenticationError",
     "ConfigurationError",
     "NetworkError",
+    "LoyaltyLionError",
     "ConnectionResult",
     "Credentials",
+    "CustomerInfo",
 ]

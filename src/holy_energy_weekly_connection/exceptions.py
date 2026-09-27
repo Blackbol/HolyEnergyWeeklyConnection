@@ -6,12 +6,16 @@ class HolyEnergyError(Exception):
 
 
 class AuthenticationError(HolyEnergyError):
-    """Raised when login credentials are rejected or the session cannot be established."""
+    """Raised when session cookie has expired, is invalid, or customer is not authenticated."""
 
 
 class NetworkError(HolyEnergyError):
-    """Raised when an HTTP request fails due to a network-level issue."""
+    """Raised when an HTTP or network request fails."""
 
 
 class ConfigurationError(HolyEnergyError):
-    """Raised when required environment variables are missing or invalid."""
+    """Raised when required environment variables or configurations are missing or invalid."""
+
+
+class LoyaltyLionError(HolyEnergyError):
+    """Raised when the LoyaltyLion API returns an unexpected error or format."""

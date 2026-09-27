@@ -1,189 +1,173 @@
-# Holy Energy — Connexion Hebdomadaire Automatique
+# ⚡ Holy Energy — Connexion Hebdomadaire Automatique
 
-Automatise la connexion hebdomadaire à [fr.holy.com](https://fr.holy.com) pour gagner **25 HOLY Coins** par semaine sans aucune intervention manuelle.
-
-## Comment ça marche
-
-Le script visite la page compte de Holy Energy en utilisant un cookie de session sauvegardé, puis appelle directement l'API LoyaltyLion pour créditer les points de fidélité — exactement ce que ferait un navigateur.
-
-**Prérequis :** Une seule action manuelle au départ (extraire le cookie depuis ton navigateur), puis tout est automatique pendant **1 an**.
+Automatise la connexion hebdomadaire à [fr.holy.com](https://fr.holy.com) pour remporter **25 HOLY Coins par semaine** (soit 1300 coins par an) sans aucune intervention manuelle récurrente.
 
 ---
 
-## Démarrage rapide
+## 🌟 Points Forts & Nouveautés (v0.2.0)
 
-### 1. Récupérer le cookie de session
+- 🔄 **Cookie Roulant Persistant (Rolling Cookie) :** Sauvegarde automatique du cookie rafraîchi par Shopify dans `data/cookie.txt` après chaque visite réussie pour prolonger la session indéfiniment.
+- 🛡️ **Anti-AdBlock & Résilience DNS :** Résolution DNS-over-HTTPS (DoH) intégrée (Cloudflare/Google) pour éviter que les ad-blockers réseau (Pi-hole, AdGuard, box internet) ne bloquent l'API `sdk.loyaltylion.net`.
+- 🐳 **Déploiement Simplifié au Choix :**
+  - **Option 1 (Recommandée) :** Démon autonome en 1 seul conteneur Docker avec planificateur intégré (Europe/Paris).
+  - **Option 2 :** Compatible Ofelia pour NAS (Synology, QNAP, Unraid).
+  - **Option 3 :** CLI local pour cron système Linux.
+- 🔔 **Notifications Multi-Canaux :** Alertes instantanées sur Discord (Webhook), Telegram (Bot) ou smartphone via [ntfy.sh](https://ntfy.sh) (succès avec solde total ou alerte si cookie expiré).
+- 🧪 **Validation Stricte & Sécurité :** Finis les faux positifs ! Le script vérifie la présence effective du token client avant d'enregistrer le cookie ou de crier victoire.
 
-1. Connecte-toi à [fr.holy.com](https://fr.holy.com) dans ton navigateur (Chrome, Brave ou Firefox)
-2. Appuie sur **F12** pour ouvrir les DevTools
-3. Va dans l'onglet **Application** → **Storage** → **Cookies** → `https://fr.holy.com`
-4. Trouve la ligne `_shopify_essential`
-5. Copie la colonne **Value** en entier (commence par `:AZ68...`, très longue chaîne)
+---
 
-### 2. Créer le fichier `.env`
+## 🚀 Démarrage Rapide
 
-Copie `.env.example` en `.env` et remplis tes informations :
+### 1. Extraire votre cookie de session (1 minute)
+
+1. Connectez-vous sur [fr.holy.com](https://fr.holy.com) dans votre navigateur (Chrome, Brave, Firefox, Edge).
+2. Appuyez sur **F12** pour ouvrir les Outils de Développement.
+3. Allez dans l'onglet **Application** (Chrome/Brave) ou **Stockage** (Firefox).
+4. Déroulez **Cookies** dans le menu de gauche et cliquez sur `https://fr.holy.com`.
+5. Repérez la ligne dont le nom est `_shopify_essential`.
+6. Double-cliquez sur sa valeur et copiez-la en entier (chaîne commençant par `:AZ...`).
+
+### 2. Configurer `.env`
+
+Copiez l'exemple et collez vos informations :
 
 ```bash
 cp .env.example .env
 ```
 
+Éditez le fichier `.env` :
+
 ```env
-HOLY_EMAIL=ton.email@exemple.com
-HOLY_PASSWORD=ton_mot_de_passe
-HOLY_SHOPIFY_COOKIE=:AZ68...colle_la_valeur_complete_ici...
+HOLY_SHOPIFY_COOKIE=:AZ...collez_ici_la_valeur_complete...
+HOLY_EMAIL=votre.email@exemple.com
 LOG_LEVEL=PROD
 ```
 
----
-
-## Déploiement avec Docker Compose (recommandé pour NAS)
-
-C'est la méthode recommandée pour un NAS (Synology, QNAP, etc.). Le container se lance automatiquement chaque lundi à 08h00.
-
-### 1. Télécharger les fichiers nécessaires
+### 3. Tester immédiatement
 
 ```bash
-mkdir holy-energy && cd holy-energy
-curl -O https://raw.githubusercontent.com/Blackbol/HolyEnergyWeeklyConnection/main/docker-compose.yml
-curl -O https://raw.githubusercontent.com/Blackbol/HolyEnergyWeeklyConnection/main/.env.example
-```
+# Vérifier la validité du cookie sans créditer
+holy-connect verify
 
-### 2. Configurer
-
-```bash
-cp .env.example .env
-# Édite .env avec tes informations
-```
-
-### 3. Créer le `docker-compose.yml`
-
-Crée un fichier `docker-compose.yml` avec ce contenu :
-
-```yaml
-services:
-
-  holy-energy:
-    image: ghcr.io/blackbol/holyenergyweeklyconnection:latest
-    container_name: holy-energy
-    environment:
-      - HOLY_EMAIL=${HOLY_EMAIL}
-      - HOLY_PASSWORD=${HOLY_PASSWORD}
-      - HOLY_SHOPIFY_COOKIE=${HOLY_SHOPIFY_COOKIE}
-      - HOLY_TIMEOUT=${HOLY_TIMEOUT:-30}
-      - LOG_LEVEL=${LOG_LEVEL:-PROD}
-      - TZ=Europe/Paris
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
-    # restart: unless-stopped  # Désactivé — lancé uniquement par ofelia chaque lundi
-
-  ofelia:
-    image: mcuadros/ofelia:latest
-    container_name: ofelia
-    depends_on:
-      - holy-energy
-    command: daemon --docker -f label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}
-    labels:
-      ofelia.job-run.weekly-connection.schedule: "0 8 * * 1"   # lundi 08:00
-      ofelia.job-run.weekly-connection.container: "holy-energy"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    restart: unless-stopped
-```
-
-### 4. Démarrer
-
-```bash
-docker compose up -d
-```
-
-Ofelia tourne en permanence et lance le script chaque lundi à 08h00. Le container Holy Energy démarre, exécute le script, puis s'arrête tout seul.
-
-### Vérifier les logs
-
-```bash
-docker compose logs ofelia
-```
-
-### Tester immédiatement sans attendre lundi
-
-```bash
-docker run --rm --env-file .env ghcr.io/blackbol/holyenergyweeklyconnection:latest
+# Ou exécuter la connexion hebdomadaire
+holy-connect run
 ```
 
 ---
 
-## Déploiement avec Docker uniquement
+## 🐳 Déploiement avec Docker Compose
 
-Si tu préfères gérer le scheduling toi-même (cron du NAS, planificateur de tâches, etc.) :
+### Option A : Démon Autonome (Recommandé)
+
+Aucun outil tiers requis. Le conteneur reste actif, consomme moins de 25 Mo de RAM, et se lance chaque **lundi à 08h00**.
+
+1. Créez un dossier et récupérez les fichiers :
+   ```bash
+   mkdir holy-energy && cd holy-energy
+   curl -O https://raw.githubusercontent.com/Blackbol/HolyEnergyWeeklyConnection/main/docker-compose.yml
+   curl -O https://raw.githubusercontent.com/Blackbol/HolyEnergyWeeklyConnection/main/.env.example
+   cp .env.example .env
+   # Renseignez .env avec votre cookie
+   ```
+
+2. Lancez le conteneur en arrière-plan :
+   ```bash
+   docker compose up -d
+   ```
+
+3. Vérifiez les logs :
+   ```bash
+   docker compose logs -f holy-energy
+   ```
+
+### Option B : Déploiement avec Ofelia (pour NAS Synology / QNAP)
+
+Si vous utilisez déjà Ofelia comme orchestrateur cron sur votre NAS :
+
+1. Ouvrez `docker-compose.yml` et décommentez le bloc `ofelia`.
+2. Lancez :
+   ```bash
+   docker compose up -d
+   ```
+
+---
+
+## 🛠️ Commandes CLI (`holy-connect`)
+
+Le paquet fournit un outil en ligne de commande complet :
+
+| Commande | Description |
+|---|---|
+| `holy-connect run` | Exécute la connexion hebdomadaire et réclame les 25 points *(défaut)* |
+| `holy-connect verify` | Teste la validité du cookie actuel et affiche le solde sans créditer |
+| `holy-connect daemon` | Démarre la boucle d'exécution planifiée en arrière-plan |
+| `holy-connect set-cookie <COOKIE>` | Enregistre un nouveau cookie dans `data/cookie.txt` et le teste immédiatement |
+| `holy-connect login` | *(Optionnel)* Ouvre un navigateur avec Playwright pour capturer le cookie automatiquement |
+
+---
+
+## ⚙️ Variables d'Environnement
+
+| Variable | Obligatoire | Valeur par défaut | Description |
+|---|:---:|:---:|---|
+| `HOLY_SHOPIFY_COOKIE` | **Oui** | — | Cookie `_shopify_essential` extrait du navigateur |
+| `HOLY_EMAIL` | Non | `""` | Email du compte (utilisé pour les logs et notifications) |
+| `HOLY_SCHEDULE_DAY` | Non | `monday` | Jour d'exécution (`monday`, `tuesday`, ..., `sunday`) |
+| `HOLY_SCHEDULE_TIME` | Non | `08:00` | Heure d'exécution planifiée (format 24h `HH:MM`) |
+| `HOLY_RUN_ON_STARTUP` | Non | `true` | Exécuter une connexion immédiate dès le démarrage du conteneur |
+| `HOLY_COOKIE_FILE` | Non | `data/cookie.txt` | Chemin du fichier où est persisté le cookie roulant |
+| `HOLY_TIMEOUT` | Non | `30` | Timeout des requêtes HTTP (secondes) |
+| `LOG_LEVEL` | Non | `PROD` | Niveau de log : `PROD` (concis), `INFO` (détaillé), `DEBUG` |
+| `TZ` | Non | `Europe/Paris` | Fuseau horaire pour la planification |
+| `DISCORD_WEBHOOK_URL` | Non | — | URL d'un webhook Discord pour recevoir les alertes |
+| `TELEGRAM_BOT_TOKEN` | Non | — | Token d'un bot Telegram |
+| `TELEGRAM_CHAT_ID` | Non | — | ID du chat Telegram destinataire |
+| `NTFY_TOPIC` | Non | — | Nom du topic [ntfy.sh](https://ntfy.sh) pour notifications mobiles |
+
+---
+
+## 🔔 Exemple de Sorties
+
+### En mode standard (`LOG_LEVEL=PROD`) :
+```text
+Connexion au site Holy Energy en cours (votre.email@exemple.com)...
+25 points crédités — Balance totale : 425 points
+```
+
+### Si les points ont déjà été crédités cette semaine :
+```text
+Connexion au site Holy Energy en cours (votre.email@exemple.com)...
+Points déjà crédités cette semaine — Balance totale : 425 points
+```
+
+---
+
+## 💻 Développement & Tests
 
 ```bash
-docker run --rm --env-file .env ghcr.io/blackbol/holyenergyweeklyconnection:latest
-```
-
-Lance cette commande chaque lundi matin depuis le planificateur de tâches de ton NAS.
-
----
-
-## Variables d'environnement
-
-| Variable | Obligatoire | Description |
-|----------|-------------|-------------|
-| `HOLY_EMAIL` | Oui | Adresse email du compte Holy Energy |
-| `HOLY_PASSWORD` | Oui | Mot de passe du compte |
-| `HOLY_SHOPIFY_COOKIE` | Oui | Cookie `_shopify_essential` extrait du navigateur (valide 1 an) |
-| `HOLY_TIMEOUT` | Non | Timeout des requêtes HTTP en secondes (défaut : `30`) |
-| `LOG_LEVEL` | Non | `PROD` (messages lisibles), `INFO` (technique), `DEBUG` (tout) — défaut : `INFO` |
-
-### Exemple de sortie avec `LOG_LEVEL=PROD`
-
-```
-Connexion au site Holy Energy en cours (ton.email@exemple.com)...
-25 points credites — Balance totale : 350 points
-```
-
-Ou, si les points ont déjà été crédités cette semaine :
-
-```
-Connexion au site Holy Energy en cours (ton.email@exemple.com)...
-Points deja credites cette semaine — Balance totale : 350 points
-```
-
----
-
-## Renouvellement annuel du cookie
-
-Le cookie expire après **1 an**. Quand le script affiche :
-
-```
-Authentication failed: Session cookie has expired or is invalid.
-```
-
-Il suffit de répéter l'étape 1 (extraire un nouveau cookie depuis le navigateur) et de mettre à jour `HOLY_SHOPIFY_COOKIE` dans `.env`.
-
----
-
-## Construction depuis les sources
-
-```bash
+# Cloner le projet
 git clone https://github.com/Blackbol/HolyEnergyWeeklyConnection.git
-cd holy-energy-weekly-connection
+cd HolyEnergyWeeklyConnection
 
-python -m venv venv
+# Environnement virtuel
+python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+
+# Installation des dépendances de dev
+pip install -r requirements-dev.txt
 pip install -e .
 
-cp .env.example .env
-# Édite .env
+# Lancer la suite de tests
+pytest
 
-python -m holy_energy_weekly_connection
+# Linter et vérification des types
+ruff check src/ tests/
+mypy src/ tests/
 ```
 
-Pour build l'image Docker localement :
+---
 
-```bash
-docker build -t holy-energy-weekly .
-docker run --rm --env-file .env holy-energy-weekly
-```
+## 📄 Licence
+
+Projet personnel sous licence MIT. Holy Energy et HOLY Coins sont des marques déposées de Holy Energy GmbH.

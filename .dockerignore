@@ -5,10 +5,11 @@ data/
 .claude/
 .github/
 venv/
+.venv/
 __pycache__/
 *.pyc
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
 src/*.egg-info/
-README.md
+tests/

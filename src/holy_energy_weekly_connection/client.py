@@ -1,36 +1,42 @@
-"""HTTP client for connecting to the Holy Energy Shopify store via saved session."""
+"""HTTP client for connecting to Holy Energy and claiming weekly loyalty coins."""
 
 import base64
 import json
 import logging
-import os
 import re
 import time
 import urllib.parse
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 
+from holy_energy_weekly_connection.dns_resolver import ensure_dns_resolution
 from holy_energy_weekly_connection.exceptions import (
     AuthenticationError,
+    LoyaltyLionError,
     NetworkError,
 )
-from holy_energy_weekly_connection.models import ConnectionResult, Credentials
+from holy_energy_weekly_connection.models import (
+    ConnectionResult,
+    Credentials,
+    CustomerInfo,
+)
+from holy_energy_weekly_connection.notifier import send_notification
 
 logger = logging.getLogger(__name__)
 
-_PROD = 25  # human-friendly log level, between INFO(20) and WARNING(30)
-
-# Shopify rotates _shopify_essential on every response.
-# The updated value is persisted here so each run uses the latest cookie.
-COOKIE_FILE = Path(os.getenv("HOLY_COOKIE_FILE", "data/cookie.txt"))
+PROD = 25
+logging.addLevelName(PROD, "PROD")
 
 BASE_URL = "https://fr.holy.com"
 ACCOUNT_URL = f"{BASE_URL}/account"
-LOGIN_URL = f"{BASE_URL}/account/login"
+ACCOUNT_LOGIN_URL = f"{BASE_URL}/pages/account-login"
 LOYALTYLION_INIT_URL = "https://sdk.loyaltylion.net/sdk/init"
+DEFAULT_SHOP_TOKEN = "6e324c01a0c0fc74286ffcd8000b5912"
 
 _CHROME_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) "
@@ -66,170 +72,317 @@ def _js_encode(obj: object) -> str:
     """
     j = json.dumps(obj, separators=(",", ":"))
     pct = urllib.parse.quote(j, safe="~!*'()")
-    return base64.b64encode(pct.encode()).decode()
+    return base64.b64encode(pct.encode("utf-8")).decode("ascii")
 
 
 class HolyEnergyClient:
-    """Connects to Holy Energy to earn HOLY Coins loyalty points.
+    """Automates weekly Holy Energy login and LoyaltyLion points claim.
 
-    Authenticates via a saved Shopify session cookie (_shopify_essential),
-    then calls the LoyaltyLion SDK init endpoint to trigger the weekly
-    visit point credit — the same call a real browser would make.
-
-    Args:
-        credentials: Credentials loaded from environment variables.
+    Authenticates using the persistent Shopify session cookie, extracts the
+    LoyaltyLion authentication payload, and calls the LoyaltyLion SDK to claim
+    the weekly visit reward.
     """
 
     def __init__(self, credentials: Credentials) -> None:
         self._credentials = credentials
-        # Prefer the persisted cookie (updated after each run) over the .env value.
-        cookie = self._load_cookie(credentials.shopify_cookie.get_secret_value())
+        self._cookie_file: Path = credentials.cookie_file
+
+        # Ensure DNS resolution is healthy (bypasses Pi-hole/AdGuard ad-blocking)
+        ensure_dns_resolution("sdk.loyaltylion.net")
+
+        # Load active cookie (preferring persisted rolling cookie, falling back to credentials)
+        persisted = self._load_persisted_cookie()
+        if persisted:
+            logger.info(
+                "Session : cookie roulant chargé depuis %s (taille: %d caractères, préfixe: %s...)",
+                self._cookie_file,
+                len(persisted),
+                persisted[:12],
+            )
+            self._active_cookie = persisted
+        else:
+            env_val = credentials.shopify_cookie.get_secret_value()
+            logger.info(
+                "Session : cookie initial chargé depuis l'environnement .env (taille: %d caractères, préfixe: %s...)",
+                len(env_val),
+                env_val[:12],
+            )
+            self._active_cookie = env_val
+
         self._http = httpx.Client(
             timeout=credentials.timeout,
             follow_redirects=True,
-            cookies={"_shopify_essential": cookie},
+            headers=_HEADERS,
+        )
+        self._set_client_cookies(self._active_cookie)
+
+    def _set_client_cookies(self, cookie_value: str) -> None:
+        """Assign the session cookie to the client jar for all Holy Energy domains."""
+        self._active_cookie = cookie_value
+        self._http.cookies.set("_shopify_essential", cookie_value, domain="fr.holy.com")
+        self._http.cookies.set("_shopify_essential", cookie_value, domain=".holy.com")
+        logger.debug(
+            "Cookie _shopify_essential assigné au client HTTP (domaines: fr.holy.com, .holy.com, taille: %d)",
+            len(cookie_value),
         )
 
-    @staticmethod
-    def _load_cookie(env_cookie: str) -> str:
-        """Return the persisted cookie if available, otherwise the .env value."""
+    def _load_persisted_cookie(self) -> str | None:
+        """Read the persisted rolling cookie from disk if it exists."""
         try:
-            saved = COOKIE_FILE.read_text().strip()
-            if saved:
-                logger.debug("Using persisted cookie from %s", COOKIE_FILE)
-                return saved
-        except FileNotFoundError:
-            pass
-        return env_cookie
-
-    def _save_cookie(self) -> None:
-        """Persist the latest cookie Shopify sent so the next run stays valid."""
-        # The jar can hold several _shopify_essential entries with different
-        # Domain attributes (the one we seeded manually vs. the one Shopify
-        # set in its response), so .get() raises CookieConflict. Take the
-        # last match instead — it's the one most recently written to the jar.
-        matches = [c for c in self._http.cookies.jar if c.name == "_shopify_essential"]
-        if not matches:
-            return
-        new_value = matches[-1].value
-        try:
-            COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            COOKIE_FILE.write_text(new_value)
-            logger.debug("Cookie persisted to %s", COOKIE_FILE)
+            if self._cookie_file.is_file():
+                content = self._cookie_file.read_text(encoding="utf-8").strip()
+                if content:
+                    logger.debug("Lecture réussie du cookie roulant dans %s", self._cookie_file)
+                    return content
+                else:
+                    logger.debug("Le fichier de cookie roulant %s est vide.", self._cookie_file)
+            else:
+                logger.debug(
+                    "Aucun fichier de cookie roulant trouvé à l'emplacement %s", self._cookie_file
+                )
         except OSError as exc:
-            logger.warning("Could not persist cookie: %s", exc)
+            logger.warning("Impossible de lire le fichier de cookie %s: %s", self._cookie_file, exc)
+        return None
 
-    def connect(self) -> ConnectionResult:
-        """Visit the account page and trigger the LoyaltyLion weekly visit credit.
-
-        Flow:
-          1. GET /account — verify session is valid, extract LoyaltyLion tokens
-          2. POST to LoyaltyLion /sdk/init — triggers the weekly visit points
-          3. Parse response to confirm whether points were credited
-
-        Returns:
-            A ConnectionResult describing the outcome.
-
-        Raises:
-            NetworkError: If the account page request fails.
-            AuthenticationError: If the session cookie has expired.
-        """
-        logger.info("Starting weekly connection to %s", BASE_URL)
-        logger.log(_PROD, "Connexion au site Holy Energy en cours (%s)...", self._credentials.email)
-
-        page_html = self._fetch_account_page()
-        self._save_cookie()  # persist the rotated cookie Shopify sent with the response
-        points_credited, message, balance = self._track_loyalty_visit(page_html)
-
-        logger.info(message)
-        if points_credited:
-            logger.log(_PROD, "25 points credites — Balance totale : %d points", balance)
-        else:
-            logger.log(_PROD, "Points deja credites cette semaine — Balance totale : %d points", balance)
-
-        return ConnectionResult(
-            success=True,
-            timestamp=datetime.now(tz=UTC),
-            message=message,
-        )
-
-    def _fetch_account_page(self) -> str:
-        """GET the account page to verify the session and retrieve LoyaltyLion tokens.
-
-        Returns:
-            The response HTML body.
-
-        Raises:
-            NetworkError: On HTTP or network failure.
-            AuthenticationError: If the cookie has expired or is invalid.
-        """
-        logger.debug("Visiting %s with saved session cookie", ACCOUNT_URL)
+    def _save_cookie(self, new_cookie: str | None) -> None:
+        """Persist updated rolling cookie to disk."""
+        if not new_cookie or not new_cookie.strip():
+            logger.debug("Aucun nouveau cookie à persister (valeur vide).")
+            return
+        clean_cookie = new_cookie.strip()
         try:
-            response = self._http.get(ACCOUNT_URL, headers=_HEADERS)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise NetworkError(
-                f"Account page returned HTTP {exc.response.status_code}"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise NetworkError(f"Network error visiting account page: {exc}") from exc
-
-        if LOGIN_URL in str(response.url):
-            raise AuthenticationError(
-                "Session cookie has expired or is invalid. "
-                "Log in to fr.holy.com in your browser, extract the "
-                "_shopify_essential cookie value, and update "
-                "HOLY_SHOPIFY_COOKIE in .env."
+            self._cookie_file.parent.mkdir(parents=True, exist_ok=True)
+            self._cookie_file.write_text(clean_cookie, encoding="utf-8")
+            self._active_cookie = clean_cookie
+            logger.info(
+                "🔄 Cookie roulant mis à jour et persisté dans %s (taille: %d caractères, préfixe: %s...)",
+                self._cookie_file,
+                len(clean_cookie),
+                clean_cookie[:12],
+            )
+        except OSError as exc:
+            logger.warning(
+                "Échec de la persistance du cookie roulant dans %s: %s", self._cookie_file, exc
             )
 
-        logger.debug("Account page loaded — session valid")
-        return response.text
+    def _extract_response_cookie(self, response: httpx.Response) -> str | None:
+        """Extract the latest _shopify_essential cookie returned by Shopify."""
+        matches = [c for c in self._http.cookies.jar if c.name == "_shopify_essential"]
+        if matches:
+            val = matches[-1].value
+            if val:
+                logger.debug(
+                    "Cookie _shopify_essential extrait de la réponse HTTP (taille: %d)", len(val)
+                )
+                return val
+        return None
 
-    def _track_loyalty_visit(self, page_html: str) -> tuple[bool, str, int]:
-        """Call the LoyaltyLion SDK init endpoint to trigger the visit credit.
+    def _is_login_redirect(self, url_str: str, html: str) -> bool:
+        """Check if the URL or page corresponds to an unauthenticated login page."""
+        lower_url = url_str.lower()
+        if "shopify.com/authentication" in lower_url:
+            logger.debug(
+                "Détection déconnexion : redirection vers Shopify Accounts ('%s')", url_str
+            )
+            return True
+        if "/customer_authentication/login" in lower_url:
+            logger.debug(
+                "Détection déconnexion : redirection vers customer_authentication/login ('%s')",
+                url_str,
+            )
+            return True
+        if "account/login" in lower_url and "/pages/account-login" not in lower_url:
+            logger.debug("Détection déconnexion : redirection vers account/login ('%s')", url_str)
+            return True
 
-        Replicates exactly what the browser's JS SDK does: encodes the auth
-        tokens embedded in the page HTML and POSTs them to LoyaltyLion's API.
+        # Check page markers
+        if (
+            ("<title>Se connecter" in html or "<title>Account login" in html)
+            and 'action="/customer_authentication/login"' in html
+            and 'id:"' not in html
+        ):
+            logger.debug(
+                "Détection déconnexion : formulaire de login présent sans identifiants client connectés."
+            )
+            return True
 
-        Args:
-            page_html: The HTML body of the account page.
+        return False
+
+    def verify_session(self) -> CustomerInfo:
+        """Verify the current session cookie and extract customer tokens.
 
         Returns:
-            A 2-tuple of (points_credited, message).
+            CustomerInfo containing customer tokens and mac.
+
+        Raises:
+            AuthenticationError: If the cookie is expired or invalid.
+            NetworkError: If the account page could not be fetched.
         """
-        # Extract the loyaltylion.init({...}) block from the page.
-        m = re.search(r"loyaltylion\.init\(\{(.+?)\}\)", page_html, re.DOTALL)
+        logger.debug("Checking session validity on Holy Energy...")
+        info = self._fetch_and_parse_customer(use_env_fallback=True)
+        return info
+
+    def _fetch_and_parse_customer(self, use_env_fallback: bool = True) -> CustomerInfo:
+        """Fetch Holy Energy page and extract customer tokens with fallback to .env."""
+        logger.debug("Envoi de la requête GET vers %s...", ACCOUNT_LOGIN_URL)
+        t0 = time.time()
+        try:
+            response = self._http.get(ACCOUNT_LOGIN_URL)
+            elapsed = time.time() - t0
+            logger.debug(
+                "Réponse reçue en %.2fs : HTTP %d, URL finale : %s",
+                elapsed,
+                response.status_code,
+                response.url,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Erreur HTTP %d lors de la requête vers Holy Energy", exc.response.status_code
+            )
+            raise NetworkError(
+                f"HTTP error fetching Holy Energy ({exc.response.status_code})"
+            ) from exc
+        except httpx.RequestError as exc:
+            logger.error("Erreur réseau de connexion vers Holy Energy: %s", exc)
+            raise NetworkError(f"Network error connecting to Holy Energy: {exc}") from exc
+
+        html = response.text
+        final_url = str(response.url)
+
+        if response.history:
+            logger.debug(
+                "Redirections suivies (%d) : %s",
+                len(response.history),
+                " -> ".join([str(r.url) for r in response.history] + [final_url]),
+            )
+
+        # Check for unauthenticated login redirection
+        if self._is_login_redirect(final_url, html):
+            logger.warning(
+                "Redirection vers une page de connexion détectée (URL: %s). Le cookie semble non authentifié.",
+                final_url,
+            )
+            # If we were using the persisted cookie, retry with the .env cookie as fallback
+            env_cookie = self._credentials.shopify_cookie.get_secret_value()
+            if use_env_fallback and self._active_cookie != env_cookie:
+                logger.info(
+                    "Le cookie roulant a été rejeté par Shopify ; tentative automatique de secours avec le cookie .env..."
+                )
+                self._set_client_cookies(env_cookie)
+                return self._fetch_and_parse_customer(use_env_fallback=False)
+
+            raise AuthenticationError(
+                "Le cookie de session Holy Energy a expiré ou est invalide. "
+                "Veuillez vous reconnecter sur fr.holy.com et mettre à jour le cookie _shopify_essential."
+            )
+
+        # Parse LoyaltyLion customer block
+        customer_info = self._parse_loyaltylion_tokens(html)
+        if not customer_info:
+            logger.warning("Échec du parsing des identifiants LoyaltyLion dans le HTML.")
+            # If customer tokens could not be found, check if retry with .env helps
+            env_cookie = self._credentials.shopify_cookie.get_secret_value()
+            if use_env_fallback and self._active_cookie != env_cookie:
+                logger.info(
+                    "Identifiants client absents avec le cookie roulant ; tentative avec le cookie .env..."
+                )
+                self._set_client_cookies(env_cookie)
+                return self._fetch_and_parse_customer(use_env_fallback=False)
+
+            raise AuthenticationError(
+                "Impossible d'extraire les identifiants client LoyaltyLion. "
+                "La session n'est pas connectée. Veuillez renouveler le cookie _shopify_essential."
+            )
+
+        # Session is valid: persist any refreshed cookie sent by Shopify
+        new_cookie = self._extract_response_cookie(response)
+        if new_cookie:
+            self._save_cookie(new_cookie)
+
+        logger.info(
+            "✅ Session authentifiée vérifiée : customer_id=%s, email=%s, date_auth=%s",
+            customer_info.customer_id,
+            customer_info.email,
+            customer_info.auth_date,
+        )
+        return customer_info
+
+    def _parse_loyaltylion_tokens(self, html: str) -> CustomerInfo | None:
+        """Extract customer ID, email, auth_date, mac, and shop_token from HTML."""
+        # Find loyaltylion.init({...})
+        m = re.search(r"loyaltylion\.init\(\{(.+?)\}\)", html, re.DOTALL)
         if not m:
-            logger.warning("LoyaltyLion init block not found in page HTML")
-            return False, (
-                "Weekly connection completed. "
-                "Could not find LoyaltyLion SDK config in page — "
-                "points status unknown."
-            ), 0
+            return None
 
         init_block = m.group(1)
 
-        # Parse the individual fields from the JS object literal.
+        # Must have customer block or customer fields
+        shop_token_match = re.search(r'token:\s*"([^"]+)"', init_block)
+        shop_token = shop_token_match.group(1) if shop_token_match else DEFAULT_SHOP_TOKEN
+
+        cid_match = re.search(r'id:\s*"([^"]+)"', init_block)
+        email_match = re.search(r'email:\s*"([^"]+)"', init_block)
+        date_match = re.search(r'date:\s*"([^"]+)"', init_block)
+        mac_match = re.search(r'token:\s*"([a-f0-9]{40})"', init_block)
+
+        if not (cid_match and email_match and date_match and mac_match):
+            return None
+
+        return CustomerInfo(
+            customer_id=cid_match.group(1),
+            email=email_match.group(1),
+            auth_date=date_match.group(1),
+            mac=mac_match.group(1),
+            shop_token=shop_token,
+        )
+
+    def connect(self) -> ConnectionResult:
+        """Execute weekly connection, credit LoyaltyLion points, and report results."""
+        display_email = self._credentials.email or "compte Holy Energy"
+        logger.info("Démarrage de la connexion hebdomadaire à %s", BASE_URL)
+        logger.log(PROD, "Connexion au site Holy Energy en cours (%s)...", display_email)
+
         try:
-            shop_token = re.search(r'token:\s*"([^"]+)"', init_block).group(1)  # type: ignore[union-attr]
-            cid = re.search(r'id:\s*"([^"]+)"', init_block).group(1)  # type: ignore[union-attr]
-            email = re.search(r'email:\s*"([^"]+)"', init_block).group(1)  # type: ignore[union-attr]
-            auth_date = re.search(r'date:\s*"([^"]+)"', init_block).group(1)  # type: ignore[union-attr]
-            # The HMAC mac token is the 40-char hex string under auth:
-            mac = re.search(r'token:\s*"([a-f0-9]{40})"', init_block).group(1)  # type: ignore[union-attr]
-        except AttributeError:
-            logger.warning("Could not parse all LoyaltyLion init fields")
-            return False, (
-                "Weekly connection completed. "
-                "Could not parse LoyaltyLion auth tokens — points status unknown."
-            ), 0
+            customer = self.verify_session()
+        except Exception as exc:
+            send_notification(self._credentials, error=exc)
+            raise
 
-        logger.debug("LoyaltyLion tokens extracted for customer %s", cid)
+        points_credited, message, balance = self._track_loyalty_visit(customer)
 
-        # Build the encoded parameters the SDK sends to /sdk/init.
+        logger.info(message)
+        if points_credited:
+            logger.log(PROD, "25 points crédités — Balance totale : %d points", balance)
+        else:
+            logger.log(
+                PROD, "Points déjà crédités cette semaine — Balance totale : %d points", balance
+            )
+
+        result = ConnectionResult(
+            success=True,
+            timestamp=datetime.now(tz=UTC),
+            points_credited=points_credited,
+            points_awarded=25 if points_credited else 0,
+            total_balance=balance,
+            message=message,
+            customer_id=customer.customer_id,
+            customer_email=customer.email,
+        )
+
+        send_notification(self._credentials, result=result)
+        return result
+
+    def _track_loyalty_visit(self, customer: CustomerInfo) -> tuple[bool, str, int]:
+        """Send tracking request to LoyaltyLion SDK to claim weekly points."""
         visitor_id = str(uuid.uuid4())
         auth_packet = _js_encode(
-            {"email": email, "id": cid, "date": auth_date, "mac": mac}
+            {
+                "email": customer.email,
+                "id": customer.customer_id,
+                "date": customer.auth_date,
+                "mac": customer.mac,
+            }
         )
         pageview_data = _js_encode(
             {
@@ -249,101 +402,132 @@ class HolyEnergyClient:
 
         params = {
             "r": "",
-            "site_token": shop_token,
+            "site_token": customer.shop_token,
             "visitor_id": visitor_id,
             "pageview_data": pageview_data,
-            "cid": cid,
+            "cid": customer.customer_id,
             "auth_packet": auth_packet,
         }
 
-        logger.debug("Calling LoyaltyLion /sdk/init to track weekly visit")
+        headers = {
+            "User-Agent": _CHROME_UA,
+            "Referer": ACCOUNT_URL,
+            "Origin": BASE_URL,
+        }
+
+        logger.debug(
+            "Envoi de la requête POST LoyaltyLion SDK init (site_token=%s, cid=%s, visitor_id=%s)...",
+            customer.shop_token,
+            customer.customer_id,
+            visitor_id,
+        )
+        t0 = time.time()
         try:
-            result = httpx.post(
+            response = self._http.post(
                 LOYALTYLION_INIT_URL,
                 params=params,
-                headers={
-                    "User-Agent": _CHROME_UA,
-                    "Referer": ACCOUNT_URL,
-                    "Origin": BASE_URL,
-                },
+                headers=headers,
                 timeout=30,
             )
-            result.raise_for_status()
-            ll_data = result.json()
+            elapsed = time.time() - t0
+            logger.debug(
+                "Réponse LoyaltyLion reçue en %.2fs : HTTP %d", elapsed, response.status_code
+            )
+            response.raise_for_status()
+            data = response.json()
         except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as exc:
-            logger.warning("LoyaltyLion SDK init call failed: %s", exc)
-            return False, (
-                "Weekly connection completed. "
-                f"LoyaltyLion API error — points status unknown: {exc}"
-            ), 0
+            logger.error("Erreur lors de l'appel à l'API LoyaltyLion: %s", exc)
+            raise LoyaltyLionError(f"Échec de l'appel à l'API LoyaltyLion: {exc}") from exc
 
-        customer = ll_data.get("customer", {})
-        points_approved = customer.get("pointsApproved", 0)
+        return self._evaluate_loyaltylion_response(data)
 
-        # Find the visit rule ID from the actions history.
+    def _evaluate_loyaltylion_response(self, data: Mapping[str, Any]) -> tuple[bool, str, int]:
+        """Analyze LoyaltyLion response payload to determine if points were awarded."""
+        customer = data.get("customer")
+        if not isinstance(customer, dict):
+            logger.warning("Objet 'customer' absent du payload renvoyé par LoyaltyLion.")
+            return False, "Visite enregistrée mais données client LoyaltyLion absentes.", 0
+
+        balance = int(customer.get("pointsApproved") or 0)
+        actions = customer.get("actions", [])
         visit_rule_id = next(
-            (a.get("ruleId") for a in customer.get("actions", [])
-             if a.get("ruleKind") == "pageview"),
+            (
+                a.get("ruleId")
+                for a in actions
+                if isinstance(a, dict) and a.get("ruleKind") == "pageview"
+            ),
             None,
         )
+        logger.debug(
+            "Données client LoyaltyLion : approvedPoints=%d, ruleId visit=%s",
+            balance,
+            visit_rule_id,
+        )
 
-        # Check pendingNotifications: populated when points are first credited
-        # in a session that hasn't yet dismissed the notification.
-        for notif in customer.get("pendingNotifications", []):
-            if "point" in json.dumps(notif).lower():
-                logger.debug("pendingNotifications: %s", notif)
-                return True, (
-                    f"Weekly connection completed. "
-                    f"25 HOLY Coins credited — pour avoir visité. "
-                    f"Balance: {points_approved} points."
-                ), points_approved
+        # 1. Check pendingNotifications (populated when points are awarded in current session)
+        pending_notifs = customer.get("pendingNotifications", [])
+        if isinstance(pending_notifs, list):
+            for notif in pending_notifs:
+                serialized = json.dumps(notif).lower()
+                if "point" in serialized:
+                    return (
+                        True,
+                        f"25 HOLY Coins crédités ! Solde total : {balance} points.",
+                        balance,
+                    )
 
-        # Check completedRules: the date shows when the rule was last completed.
-        # If it was completed within the last 10 seconds, THIS call credited it.
-        # If it's older, it was already credited before (e.g. via browser).
+        # 2. Check completedRules: rule completed in the last 30 seconds
         now = datetime.now(tz=UTC)
-        for rule in customer.get("completedRules", []):
-            if rule.get("ruleId") != visit_rule_id:
-                continue
-            try:
-                completed_at = datetime.fromisoformat(
-                    rule["date"].replace("Z", "+00:00")
-                )
-                seconds_ago = (now - completed_at).total_seconds()
-                if seconds_ago < 10:
-                    return True, (
-                        f"Weekly connection completed. "
-                        f"25 HOLY Coins credited — pour avoir visité. "
-                        f"Balance: {points_approved} points."
-                    ), points_approved
-                else:
-                    credited_when = completed_at.strftime("%Y-%m-%d at %H:%M UTC")
-                    return False, (
-                        f"Weekly connection completed. "
-                        f"Points already credited this week "
-                        f"(on {credited_when}). "
-                        f"Balance: {points_approved} points."
-                    ), points_approved
-            except (KeyError, ValueError):
-                pass
+        completed_rules = customer.get("completedRules", [])
+        if isinstance(completed_rules, list):
+            for rule in completed_rules:
+                if not isinstance(rule, dict) or rule.get("ruleId") != visit_rule_id:
+                    continue
+                rule_date_raw = rule.get("date")
+                if not isinstance(rule_date_raw, str):
+                    continue
+                try:
+                    completed_at = datetime.fromisoformat(rule_date_raw.replace("Z", "+00:00"))
+                    seconds_ago = (now - completed_at).total_seconds()
+                    if seconds_ago < 30:
+                        return (
+                            True,
+                            f"25 HOLY Coins crédités ! Solde total : {balance} points.",
+                            balance,
+                        )
+                    else:
+                        date_str = completed_at.strftime("%Y-%m-%d %H:%M UTC")
+                        return (
+                            False,
+                            f"Points déjà crédités cette semaine (le {date_str}). Solde total : {balance} points.",
+                            balance,
+                        )
+                except (ValueError, TypeError):
+                    pass
 
-        # Fallback: ruleContext confirms limit reached but no completedRules entry.
-        for ctx in customer.get("ruleContext", []):
-            if ctx.get("id") == visit_rule_id and ctx.get("limitReached"):
-                return False, (
-                    f"Weekly connection completed. "
-                    f"Points already credited this week. "
-                    f"Balance: {points_approved} points."
-                ), points_approved
+        # 3. Check ruleContext for limitReached
+        rule_context = customer.get("ruleContext", [])
+        if isinstance(rule_context, list):
+            for ctx in rule_context:
+                if (
+                    isinstance(ctx, dict)
+                    and ctx.get("id") == visit_rule_id
+                    and ctx.get("limitReached")
+                ):
+                    return (
+                        False,
+                        f"Points déjà crédités cette semaine. Solde total : {balance} points.",
+                        balance,
+                    )
 
-        return False, (
-            f"Weekly connection completed. "
-            f"Visit registered — points status unknown. "
-            f"Balance: {points_approved} points."
-        ), points_approved
+        return (
+            False,
+            f"Visite hebdomadaire enregistrée. Solde total : {balance} points.",
+            balance,
+        )
 
     def close(self) -> None:
-        """Close the underlying HTTP session."""
+        """Close HTTP client session."""
         self._http.close()
 
     def __enter__(self) -> "HolyEnergyClient":
