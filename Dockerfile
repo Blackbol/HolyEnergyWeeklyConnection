@@ -21,4 +21,4 @@ USER appuser
 VOLUME ["/app/data"]
 
 ENTRYPOINT ["holy-connect"]
-CMD ["run"]
+CMD ["daemon"]

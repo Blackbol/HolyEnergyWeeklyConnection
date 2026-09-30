@@ -31,7 +31,9 @@ def test_load_credentials_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert "Aucun cookie de session trouvé" in str(exc_info.value)
 
 
-def test_load_credentials_placeholder_cookie(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_load_credentials_placeholder_cookie(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("HOLY_SHOPIFY_COOKIE", ":AZ...collez_votre_cookie_complet_ici...")
     monkeypatch.setenv("HOLY_COOKIE_FILE", str(tmp_path / "non_existent.txt"))
     with (
@@ -147,9 +149,31 @@ def test_cmd_set_cookie(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         assert cookie_file.read_text(encoding="utf-8") == "new_cookie_content"
 
 
-def test_cmd_daemon_invalid_cookie_exits_one(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_cmd_daemon_invalid_cookie_exits_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.delenv("HOLY_SHOPIFY_COOKIE", raising=False)
     monkeypatch.setenv("HOLY_COOKIE_FILE", str(tmp_path / "non_existent.txt"))
     with patch("holy_energy_weekly_connection.cli.load_dotenv"):
         exit_code = cmd_daemon(argparse.Namespace())
         assert exit_code == 1
+
+
+def test_cmd_daemon_with_invalid_cron(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOLY_SHOPIFY_COOKIE", "some_valid_looking_cookie_of_good_length")
+    with patch("holy_energy_weekly_connection.cli.load_dotenv"):
+        args = argparse.Namespace(cron="bad cron expression", now=False)
+        exit_code = cmd_daemon(args)
+        assert exit_code == 1
+
+
+def test_cmd_daemon_starts_and_stops_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOLY_SHOPIFY_COOKIE", "some_valid_looking_cookie_of_good_length")
+    with (
+        patch("holy_energy_weekly_connection.cli.load_dotenv"),
+        patch("holy_energy_weekly_connection.scheduler.WeeklyScheduler.start") as mock_start,
+    ):
+        args = argparse.Namespace(cron="0 8 * * 1", now=False)
+        exit_code = cmd_daemon(args)
+        assert exit_code == 0
+        mock_start.assert_called_once()

@@ -119,7 +119,7 @@ class HolyEnergyClient:
 
     def _set_client_cookies(self, cookie_value: str) -> None:
         """Assign the session cookie to the client jar for all Holy Energy domains."""
-        self._active_cookie = cookie_value.strip().strip('"\'')
+        self._active_cookie = cookie_value.strip().strip("\"'")
         for domain in ["fr.holy.com", ".holy.com", "shopify.com", ".shopify.com"]:
             self._http.cookies.set("_shopify_essential", self._active_cookie, domain=domain)
         self._http.cookies.set("_shopify_essential", self._active_cookie)
@@ -134,12 +134,14 @@ class HolyEnergyClient:
             if not self._cookie_file.is_file():
                 return None
 
-            content = self._cookie_file.read_text(encoding="utf-8").strip().strip('"\'')
+            content = self._cookie_file.read_text(encoding="utf-8").strip().strip("\"'")
             if content and len(content) >= 15 and "..." not in content:
                 logger.debug("Lecture réussie du cookie roulant dans %s", self._cookie_file)
                 return content
             else:
-                logger.debug("Le fichier de cookie roulant %s est vide ou invalide.", self._cookie_file)
+                logger.debug(
+                    "Le fichier de cookie roulant %s est vide ou invalide.", self._cookie_file
+                )
         except OSError as exc:
             logger.warning("Impossible de lire le fichier de cookie %s: %s", self._cookie_file, exc)
         return None

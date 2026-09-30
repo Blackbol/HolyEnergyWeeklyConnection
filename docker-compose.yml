@@ -1,20 +1,17 @@
 services:
-
-  # ====================================================================
-  # Option 1 (Recommandée) : Démon intégré autonome (Zéro dépendance)
-  # Le conteneur reste actif et exécute la connexion chaque lundi à 08:00
-  # ====================================================================
   holy-energy:
     image: ghcr.io/blackbol/holyenergyweeklyconnection:latest
     build: .
     container_name: holy-energy
-    command: ["daemon"]
     restart: unless-stopped
+    command: ["daemon"]
     volumes:
       - ./data:/app/data   # Persistance du cookie roulant entre les exécutions
     environment:
       - HOLY_SHOPIFY_COOKIE=${HOLY_SHOPIFY_COOKIE}
       - HOLY_EMAIL=${HOLY_EMAIL:-}
+      # Planification personnalisée : format Cron (prioritaire) ou jour + heure
+      - HOLY_CRON=${HOLY_CRON:-}
       - HOLY_SCHEDULE_DAY=${HOLY_SCHEDULE_DAY:-monday}
       - HOLY_SCHEDULE_TIME=${HOLY_SCHEDULE_TIME:-08:00}
       - HOLY_RUN_ON_STARTUP=${HOLY_RUN_ON_STARTUP:-true}
@@ -24,25 +21,12 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - NTFY_TOPIC=${NTFY_TOPIC:-}
-      - TZ=Europe/Paris
+      - TZ=${TZ:-Europe/Paris}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
     dns:
       - 1.1.1.1
       - 8.8.8.8
-
-  # ====================================================================
-  # Option 2 : Déploiement avec Ofelia (Orchestrateur cron Docker pour NAS)
-  # Pour utiliser Ofelia, décommentez le service ci-dessous.
-  # ====================================================================
-  # ofelia:
-  #   image: mcuadros/ofelia:latest
-  #   container_name: ofelia
-  #   depends_on:
-  #     - holy-energy
-  #   command: daemon --docker
-  #   labels:
-  #     ofelia.job-exec.holy-weekly.schedule: "0 8 * * 1"
-  #     ofelia.job-exec.holy-weekly.container: "holy-energy"
-  #     ofelia.job-exec.holy-weekly.command: "holy-connect run"
-  #   volumes:
-  #     - /var/run/docker.sock:/var/run/docker.sock:ro
-  #   restart: unless-stopped

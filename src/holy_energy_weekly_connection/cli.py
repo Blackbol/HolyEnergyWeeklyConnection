@@ -75,7 +75,7 @@ def validate_env_cookie(raw_cookie: str | None) -> str:
             "     HOLY_SHOPIFY_COOKIE=:AZ..."
         )
 
-    clean = raw_cookie.strip().strip('"\'')
+    clean = raw_cookie.strip().strip("\"'")
 
     # Detect placeholders from .env.example
     lower = clean.lower()
@@ -213,10 +213,20 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         logger.error("Configuration invalide au démarrage : %s", exc)
         return 1
 
+    cron_expr = getattr(args, "cron", None) or os.getenv("HOLY_CRON") or os.getenv("CRON_SCHEDULE")
+    if cron_expr:
+        cron_expr = cron_expr.strip().strip("\"'")
+        if not cron_expr:
+            cron_expr = None
+
     day = os.getenv("HOLY_SCHEDULE_DAY", "monday")
     time_str = os.getenv("HOLY_SCHEDULE_TIME", "08:00")
     timezone = os.getenv("TZ", os.getenv("HOLY_TIMEZONE", "Europe/Paris"))
-    run_now = os.getenv("HOLY_RUN_ON_STARTUP", "false").lower() in ("true", "1", "yes")
+    run_now = getattr(args, "now", False) or os.getenv("HOLY_RUN_ON_STARTUP", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
 
     def _job() -> None:
         try:
@@ -226,13 +236,19 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         except Exception as exc:
             logger.error("Échec lors de l'exécution planifiée : %s", exc)
 
-    scheduler = WeeklyScheduler(
-        task=_job,
-        day_of_week=day,
-        time_str=time_str,
-        timezone_str=timezone,
-        run_immediately=run_now,
-    )
+    try:
+        scheduler = WeeklyScheduler(
+            task=_job,
+            cron_expression=cron_expr,
+            day_of_week=day,
+            time_str=time_str,
+            timezone_str=timezone,
+            run_immediately=run_now,
+        )
+    except ConfigurationError as exc:
+        logger.error("Erreur de planification : %s", exc)
+        return 1
+
     scheduler.start()
     return 0
 
@@ -340,6 +356,16 @@ def main() -> None:
     # Command: daemon
     parser_daemon = subparsers.add_parser(
         "daemon", help="Lance le planificateur hebdomadaire en arrière-plan"
+    )
+    parser_daemon.add_argument(
+        "--cron",
+        help="Expression cron personnalisée (ex: '0 8 * * 1' pour chaque lundi à 08h00)",
+        default=None,
+    )
+    parser_daemon.add_argument(
+        "--now",
+        action="store_true",
+        help="Exécute une connexion immédiatement au démarrage en plus de la planification",
     )
     parser_daemon.set_defaults(func=cmd_daemon)
 

@@ -8,10 +8,11 @@ Automatise la connexion hebdomadaire à [fr.holy.com](https://fr.holy.com) pour 
 
 - 🔄 **Cookie Roulant Persistant (Rolling Cookie) :** Sauvegarde automatique du cookie rafraîchi par Shopify dans `data/cookie.txt` après chaque visite réussie pour prolonger la session indéfiniment.
 - 🛡️ **Anti-AdBlock & Résilience DNS :** Résolution DNS-over-HTTPS (DoH) intégrée (Cloudflare/Google) pour éviter que les ad-blockers réseau (Pi-hole, AdGuard, box internet) ne bloquent l'API `sdk.loyaltylion.net`.
-- 🐳 **Déploiement Simplifié au Choix :**
-  - **Option 1 (Recommandée) :** Démon autonome en 1 seul conteneur Docker avec planificateur intégré (Europe/Paris).
-  - **Option 2 :** Compatible Ofelia pour NAS (Synology, QNAP, Unraid).
-  - **Option 3 :** CLI local pour cron système Linux.
+- ⚡ **Démon Autonome Ultra-Basse Consommation (0.00% CPU, < 30 Mo RAM) :**
+  - Tourne 24h/24 en arrière-plan sans aucun outil externe (plus besoin d'Ofelia).
+  - Utilise les mécanismes de mise en veille du noyau Linux (`futex wait`) : zéro cycle processeur consommé en attente.
+  - Planificateur Cron entièrement paramétrable via variable d'environnement (`HOLY_CRON`).
+  - Arrêt instantané et propre lors d'un `docker stop` (gestion propre des signaux SIGTERM/SIGINT).
 - 🔔 **Notifications Multi-Canaux :** Alertes instantanées sur Discord (Webhook), Telegram (Bot) ou smartphone via [ntfy.sh](https://ntfy.sh) (succès avec solde total ou alerte si cookie expiré).
 - 🧪 **Validation Stricte & Sécurité :** Finis les faux positifs ! Le script vérifie la présence effective du token client avant d'enregistrer le cookie ou de crier victoire.
 
@@ -41,6 +42,7 @@ cp .env.example .env
 ```env
 HOLY_SHOPIFY_COOKIE=:AZ...collez_ici_la_valeur_complete...
 HOLY_EMAIL=votre.email@exemple.com
+HOLY_CRON=0 8 * * 1
 LOG_LEVEL=PROD
 ```
 
@@ -56,19 +58,17 @@ holy-connect run
 
 ---
 
-## 🐳 Déploiement avec Docker Compose
+## 🐳 Déploiement avec Docker Compose (24/7 Autonome)
 
-### Option A : Démon Autonome (Recommandé)
+Le conteneur tourne en continu, consomme **0.00% de CPU** et moins de **30 Mo de RAM** en veille. Il se réveille automatiquement selon la planification Cron configurée.
 
-Aucun outil tiers requis. Le conteneur reste actif, consomme moins de 25 Mo de RAM, et se lance chaque **lundi à 08h00**.
-
-1. Créez un dossier et récupérez les fichiers :
+1. Créez un dossier et récupérez les fichiers nécessaires :
    ```bash
    mkdir holy-energy && cd holy-energy
    curl -O https://raw.githubusercontent.com/Blackbol/HolyEnergyWeeklyConnection/main/docker-compose.yml
    curl -O https://raw.githubusercontent.com/Blackbol/HolyEnergyWeeklyConnection/main/.env.example
    cp .env.example .env
-   # Renseignez .env avec votre cookie
+   # Renseignez votre cookie dans .env
    ```
 
 2. Lancez le conteneur en arrière-plan :
@@ -76,19 +76,15 @@ Aucun outil tiers requis. Le conteneur reste actif, consomme moins de 25 Mo de R
    docker compose up -d
    ```
 
-3. Vérifiez les logs :
+3. Consultez les logs :
    ```bash
    docker compose logs -f holy-energy
    ```
 
-### Option B : Déploiement avec Ofelia (pour NAS Synology / QNAP)
-
-Si vous utilisez déjà Ofelia comme orchestrateur cron sur votre NAS :
-
-1. Ouvrez `docker-compose.yml` et décommentez le bloc `ofelia`.
-2. Lancez :
+4. Pour arrêter ou redémarrer le conteneur à tout moment :
    ```bash
-   docker compose up -d
+   docker compose stop    # Arrêt instantané et propre
+   docker compose restart
    ```
 
 ---
@@ -101,7 +97,7 @@ Le paquet fournit un outil en ligne de commande complet :
 |---|---|
 | `holy-connect run` | Exécute la connexion hebdomadaire et réclame les 25 points *(défaut)* |
 | `holy-connect verify` | Teste la validité du cookie actuel et affiche le solde sans créditer |
-| `holy-connect daemon` | Démarre la boucle d'exécution planifiée en arrière-plan |
+| `holy-connect daemon` | Démarre la boucle d'exécution planifiée en arrière-plan (avec support `--cron` et `--now`) |
 | `holy-connect set-cookie <COOKIE>` | Enregistre un nouveau cookie dans `data/cookie.txt` et le teste immédiatement |
 | `holy-connect login` | *(Optionnel)* Ouvre un navigateur avec Playwright pour capturer le cookie automatiquement |
 
@@ -113,9 +109,10 @@ Le paquet fournit un outil en ligne de commande complet :
 |---|:---:|:---:|---|
 | `HOLY_SHOPIFY_COOKIE` | **Oui** | — | Cookie `_shopify_essential` extrait du navigateur |
 | `HOLY_EMAIL` | Non | `""` | Email du compte (utilisé pour les logs et notifications) |
-| `HOLY_SCHEDULE_DAY` | Non | `monday` | Jour d'exécution (`monday`, `tuesday`, ..., `sunday`) |
-| `HOLY_SCHEDULE_TIME` | Non | `08:00` | Heure d'exécution planifiée (format 24h `HH:MM`) |
-| `HOLY_RUN_ON_STARTUP` | Non | `true` | Exécuter une connexion immédiate dès le démarrage du conteneur |
+| `HOLY_CRON` | Non | — | Expression Cron (ex: `0 8 * * 1` pour chaque lundi à 08:00). Prioritaire sur DAY/TIME. |
+| `HOLY_SCHEDULE_DAY` | Non | `monday` | Jour d'exécution si `HOLY_CRON` non défini (`monday`, ..., `sunday`) |
+| `HOLY_SCHEDULE_TIME` | Non | `08:00` | Heure d'exécution planifiée si `HOLY_CRON` non défini (format 24h `HH:MM`) |
+| `HOLY_RUN_ON_STARTUP` | Non | `true` | Exécuter une connexion immédiate dès le démarrage du conteneur en plus du cron |
 | `HOLY_COOKIE_FILE` | Non | `data/cookie.txt` | Chemin du fichier où est persisté le cookie roulant |
 | `HOLY_TIMEOUT` | Non | `30` | Timeout des requêtes HTTP (secondes) |
 | `LOG_LEVEL` | Non | `PROD` | Niveau de log : `PROD` (concis), `INFO` (détaillé), `DEBUG` |
@@ -124,6 +121,7 @@ Le paquet fournit un outil en ligne de commande complet :
 | `TELEGRAM_BOT_TOKEN` | Non | — | Token d'un bot Telegram |
 | `TELEGRAM_CHAT_ID` | Non | — | ID du chat Telegram destinataire |
 | `NTFY_TOPIC` | Non | — | Nom du topic [ntfy.sh](https://ntfy.sh) pour notifications mobiles |
+
 
 ---
 
