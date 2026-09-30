@@ -222,7 +222,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     day = os.getenv("HOLY_SCHEDULE_DAY", "monday")
     time_str = os.getenv("HOLY_SCHEDULE_TIME", "08:00")
     timezone = os.getenv("TZ", os.getenv("HOLY_TIMEZONE", "Europe/Paris"))
-    run_now = getattr(args, "now", False) or os.getenv("HOLY_RUN_ON_STARTUP", "false").lower() in (
+    run_now = getattr(args, "now", False) or os.getenv("HOLY_RUN_ON_STARTUP", "true").lower() in (
         "true",
         "1",
         "yes",

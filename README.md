@@ -60,7 +60,43 @@ holy-connect run
 
 ## 🐳 Déploiement avec Docker Compose (24/7 Autonome)
 
-Le conteneur tourne en continu, consomme **0.00% de CPU** et moins de **30 Mo de RAM** en veille. Il se réveille automatiquement selon la planification Cron configurée.
+Le conteneur tourne en continu, consomme **0.00% de CPU** et moins de **30 Mo de RAM** en veille. Il utilise directement l'image hébergée sur GitHub Container Registry (`ghcr.io`) et se réveille automatiquement selon la planification Cron configurée.
+
+### Contenu du fichier `docker-compose.yml`
+
+```yaml
+services:
+  holy-energy:
+    image: ghcr.io/blackbol/holyenergyweeklyconnection:latest
+    container_name: holy-energy
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data   # Persistance du cookie roulant entre les exécutions
+    environment:
+      - HOLY_SHOPIFY_COOKIE=${HOLY_SHOPIFY_COOKIE}
+      - HOLY_EMAIL=${HOLY_EMAIL:-}
+      - HOLY_CRON=${HOLY_CRON:-}
+      - HOLY_SCHEDULE_DAY=${HOLY_SCHEDULE_DAY:-monday}
+      - HOLY_SCHEDULE_TIME=${HOLY_SCHEDULE_TIME:-08:00}
+      - HOLY_RUN_ON_STARTUP=${HOLY_RUN_ON_STARTUP:-true}
+      - HOLY_TIMEOUT=${HOLY_TIMEOUT:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-PROD}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - NTFY_TOPIC=${NTFY_TOPIC:-}
+      - TZ=${TZ:-Europe/Paris}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+```
+
+### Démarrage rapide
 
 1. Créez un dossier et récupérez les fichiers nécessaires :
    ```bash
@@ -83,7 +119,7 @@ Le conteneur tourne en continu, consomme **0.00% de CPU** et moins de **30 Mo de
 
 4. Pour arrêter ou redémarrer le conteneur à tout moment :
    ```bash
-   docker compose stop    # Arrêt instantané et propre
+   docker compose stop    # Arrêt instantané et propre (< 50ms)
    docker compose restart
    ```
 

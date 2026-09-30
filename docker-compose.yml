@@ -1,10 +1,8 @@
 services:
   holy-energy:
     image: ghcr.io/blackbol/holyenergyweeklyconnection:latest
-    build: .
     container_name: holy-energy
     restart: unless-stopped
-    command: ["daemon"]
     volumes:
       - ./data:/app/data   # Persistance du cookie roulant entre les exécutions
     environment:
