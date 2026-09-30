@@ -12,6 +12,8 @@ from croniter import croniter
 
 from holy_energy_weekly_connection.exceptions import ConfigurationError
 
+PROD = 25
+logging.addLevelName(PROD, "PROD")
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +23,8 @@ class WeeklyScheduler:
     Uses OS kernel thread suspension (futex wait) to ensure 0.00% CPU when idle.
     Gracefully handles SIGINT and SIGTERM for instantaneous shutdown.
     """
+
+    FRENCH_DAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 
     DAYS_MAP = {
         "monday": 0,
@@ -91,6 +95,12 @@ class WeeklyScheduler:
         next_dt: datetime = iterator.get_next(datetime)
         return next_dt
 
+    @classmethod
+    def format_next_run_display(cls, dt: datetime) -> str:
+        """Format datetime into a localized French string like 'Lundi 05/10/2026 à 08:00'."""
+        day = cls.FRENCH_DAYS[dt.weekday()]
+        return f"{day} {dt.strftime('%d/%m/%Y à %H:%M')}"
+
     @staticmethod
     def format_countdown(next_run: datetime, now: datetime) -> str:
         """Format the remaining duration into human-readable text."""
@@ -133,14 +143,14 @@ class WeeklyScheduler:
         now = datetime.now(self.tz)
         next_run = self.get_next_run(now)
         countdown = self.format_countdown(next_run, now)
+        next_run_display = self.format_next_run_display(next_run)
 
-        logger.info(
-            "🚀 Démon Holy Energy initialisé avec succès.\n"
-            "   ⏰ Planification Cron : %s (Fuseau : %s)\n"
-            "   📅 Prochaine exécution : %s (%s)",
+        # Logged at PROD level so it is ALWAYS visible, even with LOG_LEVEL=PROD and HOLY_RUN_ON_STARTUP=false
+        logger.log(
+            PROD,
+            "🚀 Démon Holy Energy démarré [Cron: %s]. Prochaine activation : %s (%s)",
             self.cron_expression,
-            self.tz.key,
-            next_run.strftime("%A %d/%m/%Y à %H:%M"),
+            next_run_display,
             countdown,
         )
 
@@ -151,10 +161,13 @@ class WeeklyScheduler:
             self._execute_task()
             now = datetime.now(self.tz)
             next_run = self.get_next_run(now)
-            logger.info(
-                "📅 Prochaine exécution planifiée : %s (%s)",
-                next_run.strftime("%A %d/%m/%Y à %H:%M"),
-                self.format_countdown(next_run, now),
+            countdown = self.format_countdown(next_run, now)
+            next_run_display = self.format_next_run_display(next_run)
+            logger.log(
+                PROD,
+                "📅 Prochaine activation : %s (%s)",
+                next_run_display,
+                countdown,
             )
 
         while self._running and not self._stop_event.is_set():
@@ -163,16 +176,20 @@ class WeeklyScheduler:
                 seconds_until_run = (next_run - now).total_seconds()
 
                 if seconds_until_run <= 0.05:
-                    logger.info(
-                        "⏰ Heure de connexion atteinte ! Démarrage de la tâche planifiée..."
+                    logger.log(
+                        PROD,
+                        "⏰ Heure de connexion atteinte ! Démarrage de la tâche planifiée...",
                     )
                     self._execute_task()
                     now_after = datetime.now(self.tz)
                     next_run = self.get_next_run(now_after)
-                    logger.info(
-                        "📅 Prochaine exécution planifiée : %s (%s)",
-                        next_run.strftime("%A %d/%m/%Y à %H:%M"),
-                        self.format_countdown(next_run, now_after),
+                    countdown = self.format_countdown(next_run, now_after)
+                    next_run_display = self.format_next_run_display(next_run)
+                    logger.log(
+                        PROD,
+                        "📅 Prochaine activation : %s (%s)",
+                        next_run_display,
+                        countdown,
                     )
                     continue
 
@@ -187,14 +204,14 @@ class WeeklyScheduler:
                 if (next_run - now_hb).total_seconds() > 1.0:
                     logger.info(
                         "💓 Démon actif en attente. Prochaine exécution : %s (%s)",
-                        next_run.strftime("%A %d/%m/%Y à %H:%M"),
+                        self.format_next_run_display(next_run),
                         self.format_countdown(next_run, now_hb),
                     )
             except Exception as exc:
                 logger.error("Erreur inattendue dans la boucle du démon: %s", exc)
                 self._stop_event.wait(timeout=60.0)
 
-        logger.info("Démon Holy Energy arrêté.")
+        logger.log(PROD, "Démon Holy Energy arrêté.")
 
     def _execute_task(self) -> None:
         t0 = time.time()
